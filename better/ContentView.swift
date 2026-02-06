@@ -1,61 +1,72 @@
-//
-//  ContentView.swift
-//  better
-//
-//  Created by Thomas Burke on 2/5/26.
-//
-
 import SwiftUI
 import SwiftData
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @Environment(AppState.self) private var appState
+
+    @State private var currentConversation: Conversation?
+    @State private var chatViewModel: ChatViewModel?
+    @State private var showHistory = false
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-                    }
+        NavigationStack {
+            Group {
+                if let chatVM = chatViewModel {
+                    ChatView(viewModel: chatVM)
+                } else {
+                    ProgressView()
                 }
-                .onDelete(perform: deleteItems)
             }
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        showHistory = true
+                    } label: {
+                        Label("History", systemImage: "clock.arrow.counterclockwise")
+                    }
                 }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
+
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        createNewConversation()
+                    } label: {
+                        Label("New Chat", systemImage: "square.and.pencil")
                     }
                 }
             }
-        } detail: {
-            Text("Select an item")
         }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
+        .sheet(isPresented: $showHistory) {
+            ConversationHistorySheet(
+                onSelect: { conversation in
+                    switchToConversation(conversation)
+                    showHistory = false
+                }
+            )
         }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
+        .sheet(isPresented: Bindable(appState).showSettings) {
+            SettingsView()
+        }
+        .onAppear {
+            if !appState.hasAPIKey {
+                appState.showSettings = true
+            }
+            if currentConversation == nil {
+                createNewConversation()
             }
         }
     }
-}
 
-#Preview {
-    ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+    private func createNewConversation() {
+        let conversation = Conversation()
+        modelContext.insert(conversation)
+        try? modelContext.save()
+        switchToConversation(conversation)
+        Haptics.light()
+    }
+
+    private func switchToConversation(_ conversation: Conversation) {
+        currentConversation = conversation
+        chatViewModel = ChatViewModel(conversation: conversation, modelContext: modelContext)
+    }
 }

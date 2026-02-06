@@ -12,7 +12,8 @@ import SwiftData
 struct betterApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Item.self,
+            Conversation.self,
+            Message.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
@@ -22,10 +23,13 @@ struct betterApp: App {
             fatalError("Could not create ModelContainer: \(error)")
         }
     }()
+    
+    @State private var appState = AppState()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(appState)
         }
         .modelContainer(sharedModelContainer)
     }
