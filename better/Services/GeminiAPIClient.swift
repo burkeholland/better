@@ -13,12 +13,19 @@ struct GenerationConfig: Sendable {
     let topK: Int
     let maxOutputTokens: Int
     let thinkingBudget: Int?
+    var responseModalities: [String]? = nil
+    var imageConfig: ImageConfig? = nil
+}
+
+struct ImageConfig: Encodable, Sendable {
+    let aspectRatio: String?
 }
 
 struct ToolsConfig: Sendable {
     let googleSearch: Bool
     let codeExecution: Bool
     let urlContext: Bool
+    let imageGeneration: Bool
 }
 
 struct ModelInfo: Codable, Sendable {
@@ -47,6 +54,12 @@ struct ResponsePart: Codable, Sendable {
     let text: String?
     let inlineData: ResponseInlineData?
     let thought: Bool?
+    let functionCall: FunctionCallResponse?
+}
+
+struct FunctionCallResponse: Codable, Sendable {
+    let name: String
+    let args: [String: String]?
 }
 
 struct ResponseInlineData: Codable, Sendable {
@@ -240,7 +253,9 @@ final class GeminiAPIClient {
             topP: config.topP,
             topK: config.topK,
             maxOutputTokens: config.maxOutputTokens,
-            thinkingBudget: config.thinkingBudget
+            thinkingBudget: config.thinkingBudget,
+            responseModalities: config.responseModalities,
+            imageConfig: config.imageConfig
         )
 
         let system = systemInstruction.map { SystemInstruction(parts: [Part(text: $0, inlineData: nil)]) }
@@ -277,13 +292,30 @@ final class GeminiAPIClient {
 
         var toolList: [Tool] = []
         if tools.googleSearch {
-            toolList.append(Tool(googleSearch: Empty(), codeExecution: nil, urlContext: nil))
+            toolList.append(Tool(googleSearch: Empty(), codeExecution: nil, urlContext: nil, functionDeclarations: nil))
         }
         if tools.codeExecution {
-            toolList.append(Tool(googleSearch: nil, codeExecution: Empty(), urlContext: nil))
+            toolList.append(Tool(googleSearch: nil, codeExecution: Empty(), urlContext: nil, functionDeclarations: nil))
         }
         if tools.urlContext {
-            toolList.append(Tool(googleSearch: nil, codeExecution: nil, urlContext: Empty()))
+            toolList.append(Tool(googleSearch: nil, codeExecution: nil, urlContext: Empty(), functionDeclarations: nil))
+        }
+        if tools.imageGeneration {
+            let decl = FunctionDeclaration(
+                name: "generate_image",
+                description: "Generate an image based on a text description. Use this whenever the user asks you to create, generate, draw, paint, sketch, illustrate, or make an image, picture, photo, illustration, or artwork.",
+                parameters: FunctionParameters(
+                    type: "object",
+                    properties: [
+                        "prompt": FunctionProperty(
+                            type: "string",
+                            description: "A detailed, optimized prompt for image generation. Enhance the user's request with specific details about style, composition, lighting, colors, and mood to produce the best possible image."
+                        )
+                    ],
+                    required: ["prompt"]
+                )
+            )
+            toolList.append(Tool(googleSearch: nil, codeExecution: nil, urlContext: nil, functionDeclarations: [decl]))
         }
 
         return toolList.isEmpty ? nil : toolList
@@ -330,6 +362,8 @@ private struct GenerationConfigBody: Encodable {
     let topK: Int
     let maxOutputTokens: Int
     let thinkingBudget: Int?
+    let responseModalities: [String]?
+    let imageConfig: ImageConfig?
 }
 
 private struct SystemInstruction: Encodable {
@@ -342,6 +376,24 @@ private struct Tool: Encodable {
     let googleSearch: Empty?
     let codeExecution: Empty?
     let urlContext: Empty?
+    let functionDeclarations: [FunctionDeclaration]?
+}
+
+private struct FunctionDeclaration: Encodable {
+    let name: String
+    let description: String
+    let parameters: FunctionParameters
+}
+
+private struct FunctionParameters: Encodable {
+    let type: String
+    let properties: [String: FunctionProperty]
+    let required: [String]
+}
+
+private struct FunctionProperty: Encodable {
+    let type: String
+    let description: String
 }
 
 private struct APIErrorResponse: Codable {

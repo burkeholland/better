@@ -15,7 +15,7 @@ struct SettingsView: View {
                     if hasAPIKey {
                         HStack {
                             Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
+                                .foregroundStyle(Theme.mint)
                             Text("API Key configured")
                             Spacer()
                             Button("Remove", role: .destructive) {
@@ -37,17 +37,66 @@ struct SettingsView: View {
                         Button("Save API Key") {
                             saveKey()
                         }
+                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(Theme.sendButtonGradient)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous))
+                        .foregroundStyle(.white)
+                        .font(.headline)
+                        .opacity(apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.5 : 1.0)
                         .disabled(apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 } header: {
-                    Text("API Key")
+                    HStack(spacing: 8) {
+                        Image(systemName: "key.fill")
+                            .font(.caption)
+                            .foregroundStyle(Theme.accentGradient)
+                        Text("API Key")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(Theme.accentGradient)
+                    }
                 } footer: {
                     Text("Get your API key from Google AI Studio (aistudio.google.com)")
                 }
 
-                Section("About") {
+                Section {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous)
+                                .fill(Theme.accentGradient)
+                                .frame(width: 44, height: 44)
+                            Image(systemName: "bubble.left.and.text.bubble.right.fill")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Better")
+                                .font(.headline)
+                                .foregroundStyle(Theme.accentGradient)
+                            Text("Springtime chat")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
+
                     LabeledContent("Version", value: "1.0")
                     LabeledContent("Build", value: "1")
+                } header: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(Theme.accentGradient)
+                        Text("About")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(Theme.accentGradient)
+                    }
                 }
             }
             .navigationTitle("Settings")
@@ -57,6 +106,7 @@ struct SettingsView: View {
                     Button("Done") {
                         dismiss()
                     }
+                    .foregroundStyle(Theme.lavender)
                 }
             }
             .alert("API Key Saved", isPresented: $showSavedAlert) {
@@ -69,6 +119,7 @@ struct SettingsView: View {
                 }
             }
         }
+        .tint(Theme.lavender)
     }
     
     private func saveKey() {

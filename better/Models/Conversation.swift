@@ -31,7 +31,7 @@ final class Conversation {
 
     init(
         title: String = "New Chat",
-        modelName: String = "gemini-2.5-flash",
+        modelName: String = Constants.Models.defaultModel,
         temperature: Double = 1.0,
         topP: Double = 0.95,
         topK: Int = 40,
@@ -69,7 +69,9 @@ final class Conversation {
 
         while true {
             let children = sorted.filter { $0.parentId == current.id }
-            guard let latest = children.last else { break }
+            guard let latest = children.max(by: { a, b in
+                (a.selectedAt ?? a.createdAt) < (b.selectedAt ?? b.createdAt)
+            }) else { break }
             branch.append(latest)
             current = latest
         }

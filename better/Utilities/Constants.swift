@@ -6,14 +6,11 @@ enum Constants {
     static let keychainAPIKeyAccount = "gemini-api-key"
 
     enum Models {
-        static let all: [(id: String, name: String, description: String)] = [
-            ("gemini-2.5-pro", "Gemini 2.5 Pro", "Advanced thinking"),
-            ("gemini-2.5-flash", "Gemini 2.5 Flash", "Best price-performance"),
-            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", "Fastest & cheapest"),
-            ("gemini-2.5-flash-preview-image-generation", "Gemini Image Gen", "Image generation"),
-        ]
-
-        static let defaultModel = "gemini-2.5-flash"
+        static let flash = "gemini-flash-latest"
+        static let pro = "gemini-pro-latest"
+        static let flashImage = "gemini-2.5-flash-image"
+        static let proImage = "gemini-3-pro-image-preview"
+        static let defaultModel = flash
     }
 
     enum Defaults {

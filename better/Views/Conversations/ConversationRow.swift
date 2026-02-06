@@ -4,35 +4,46 @@ struct ConversationRow: View {
     let conversation: Conversation
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(conversation.title)
-                    .font(.body)
-                    .lineLimit(1)
+        HStack(alignment: .center, spacing: 10) {
+            Capsule()
+                .fill(Theme.accentGradient)
+                .frame(width: 3)
 
-                if conversation.isPinned {
-                    Image(systemName: "pin.fill")
+            Image(systemName: "bubble.left.fill")
+                .font(.title3)
+                .foregroundStyle(Theme.accentGradient)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(conversation.title)
+                        .font(.body)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+
+                    if conversation.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.warmYellow)
+                    }
+                }
+
+                HStack {
+                    Text(conversation.modelName)
                         .font(.caption2)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Theme.lavender)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Theme.lavender.opacity(0.12))
+                        .clipShape(Capsule())
+
+                    Spacer()
+
+                    Text(conversation.updatedAt, style: .relative)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
             }
-
-            HStack {
-                Text(conversation.modelName)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color(.systemGray5))
-                    .clipShape(Capsule())
-
-                Spacer()
-
-                Text(conversation.updatedAt, style: .relative)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
     }
 }

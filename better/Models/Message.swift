@@ -9,6 +9,7 @@ final class Message {
     var role: String  // "user" or "model"
     var content: String
     var createdAt: Date
+    var selectedAt: Date?
     var parentId: UUID?  // For branching - references another Message's id
 
     var conversation: Conversation?

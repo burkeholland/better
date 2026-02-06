@@ -8,7 +8,10 @@ struct ModelPickerView: View {
         Picker("Model", selection: $selectedModel) {
             if appState.availableModels.isEmpty {
                 // Fallback to hardcoded list
-                ForEach(Constants.Models.all, id: \.id) { model in
+                ForEach([
+                    (id: Constants.Models.flash, name: "Flash"),
+                    (id: Constants.Models.pro, name: "Pro"),
+                ], id: \.id) { model in
                     Text(model.name)
                         .tag(model.id)
                 }

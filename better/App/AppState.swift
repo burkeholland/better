@@ -38,9 +38,10 @@ final class AppState {
                 .sorted { $0.displayName < $1.displayName }
         } catch {
             // Fall back to defaults if API call fails
-            availableModels = Constants.Models.all.map {
-                GeminiModel(id: $0.id, displayName: $0.name, description: $0.description)
-            }
+            availableModels = [
+                GeminiModel(id: Constants.Models.flash, displayName: "Flash", description: "Fast & efficient"),
+                GeminiModel(id: Constants.Models.pro, displayName: "Pro", description: "Advanced thinking"),
+            ]
         }
     }
 }

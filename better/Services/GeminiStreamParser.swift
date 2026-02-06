@@ -4,6 +4,7 @@ enum StreamEvent: Sendable {
     case text(String)
     case thinking(String)
     case imageData(Data, mimeType: String)
+    case functionCall(name: String, args: [String: String])
     case usageMetadata(inputTokens: Int, outputTokens: Int, cachedTokens: Int?)
     case error(String)
     case done
@@ -104,6 +105,10 @@ enum GeminiStreamParser {
                     continuation.yield(.error("Invalid base64 image data"))
                 }
             }
+
+            if let functionCall = part.functionCall {
+                continuation.yield(.functionCall(name: functionCall.name, args: functionCall.args ?? [:]))
+            }
         }
     }
 }
@@ -127,6 +132,12 @@ private struct StreamPart: Codable {
     let text: String?
     let inlineData: StreamInlineData?
     let thought: Bool?
+    let functionCall: StreamFunctionCall?
+}
+
+private struct StreamFunctionCall: Codable {
+    let name: String
+    let args: [String: String]?
 }
 
 private struct StreamInlineData: Codable {

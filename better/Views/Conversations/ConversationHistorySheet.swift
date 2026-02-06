@@ -3,6 +3,7 @@ import SwiftData
 
 struct ConversationHistorySheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \Conversation.updatedAt, order: .reverse) private var conversations: [Conversation]
     @State private var searchText = ""
 
@@ -13,28 +14,64 @@ struct ConversationHistorySheet: View {
             List {
                 let pinned = filtered.filter { $0.isPinned }
                 if !pinned.isEmpty {
-                    Section("Pinned") {
+                    Section {
                         ForEach(pinned) { conversation in
                             Button {
                                 onSelect(conversation)
                             } label: {
                                 ConversationRow(conversation: conversation)
                             }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    deleteConversation(conversation)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .tint(Theme.coral)
+                            }
                             .tint(.primary)
+                        }
+                    } header: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "pin.fill")
+                                .font(.caption)
+                                .foregroundStyle(Theme.accentGradient)
+                            Text("Pinned")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(Theme.accentGradient)
                         }
                     }
                 }
 
                 let recent = filtered.filter { !$0.isPinned && !$0.isArchived }
                 if !recent.isEmpty {
-                    Section("Recent") {
+                    Section {
                         ForEach(recent) { conversation in
                             Button {
                                 onSelect(conversation)
                             } label: {
                                 ConversationRow(conversation: conversation)
                             }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    deleteConversation(conversation)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .tint(Theme.coral)
+                            }
                             .tint(.primary)
+                        }
+                    } header: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "sparkles")
+                                .font(.caption)
+                                .foregroundStyle(Theme.accentGradient)
+                            Text("Recent")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(Theme.accentGradient)
                         }
                     }
                 }
@@ -47,18 +84,26 @@ struct ConversationHistorySheet: View {
                     Button("Done") {
                         dismiss()
                     }
+                    .foregroundStyle(Theme.lavender)
                 }
             }
             .overlay {
                 if conversations.isEmpty {
-                    ContentUnavailableView(
-                        "No Conversations Yet",
-                        systemImage: "bubble.left",
-                        description: Text("Your chat history will appear here")
-                    )
+                    ContentUnavailableView {
+                        VStack(spacing: 8) {
+                            Image(systemName: "bubble.left.and.text.bubble.right")
+                                .font(.system(size: 44, weight: .semibold))
+                                .foregroundStyle(Theme.accentGradient)
+                            Text("No Conversations Yet")
+                                .font(.headline)
+                        }
+                    } description: {
+                        Text("Your chat history will appear here")
+                    }
                 }
             }
         }
+        .tint(Theme.lavender)
     }
 
     private var filtered: [Conversation] {
@@ -66,5 +111,11 @@ struct ConversationHistorySheet: View {
             return conversations
         }
         return conversations.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+    }
+
+    private func deleteConversation(_ conversation: Conversation) {
+        modelContext.delete(conversation)
+        try? modelContext.save()
+        Haptics.light()
     }
 }
