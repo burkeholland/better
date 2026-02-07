@@ -7,6 +7,7 @@
 
 import SwiftUI
 import FirebaseCore
+import GoogleSignIn
 
 @main
 struct betterApp: App {
@@ -15,6 +16,7 @@ struct betterApp: App {
 
     init() {
         FirebaseApp.configure()
+        GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: FirebaseApp.app()!.options.clientID!)
         _authService = State(initialValue: AuthService())
     }
 

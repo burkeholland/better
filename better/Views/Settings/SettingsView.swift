@@ -1,4 +1,5 @@
 import SwiftUI
+import FirebaseAuth
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss

@@ -6,13 +6,34 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		E9D6D9692F36F4E8007C64DE /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = E9D6D9682F36F4E8007C64DE /* FirebaseAuth */; };
+		E9D6D96B2F36F4E8007C64DE /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = E9D6D96A2F36F4E8007C64DE /* FirebaseFirestore */; };
+		E9D6D96D2F36F4E8007C64DE /* FirebaseStorage in Frameworks */ = {isa = PBXBuildFile; productRef = E9D6D96C2F36F4E8007C64DE /* FirebaseStorage */; };
+		E9D6D9702F36F505007C64DE /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = E9D6D96F2F36F505007C64DE /* GoogleSignIn */; };
+		E9D6D9722F36F505007C64DE /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = E9D6D9712F36F505007C64DE /* GoogleSignInSwift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		E9D6D76A2F3569FE007C64DE /* better.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = better.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		E9D6D9762F36F612007C64DE /* Exceptions for "better" folder in "better" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = E9D6D7692F3569FE007C64DE /* better */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		E9D6D76C2F3569FE007C64DE /* better */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				E9D6D9762F36F612007C64DE /* Exceptions for "better" folder in "better" target */,
+			);
 			path = better;
 			sourceTree = "<group>";
 		};
@@ -23,6 +44,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E9D6D9722F36F505007C64DE /* GoogleSignInSwift in Frameworks */,
+				E9D6D9692F36F4E8007C64DE /* FirebaseAuth in Frameworks */,
+				E9D6D9702F36F505007C64DE /* GoogleSignIn in Frameworks */,
+				E9D6D96B2F36F4E8007C64DE /* FirebaseFirestore in Frameworks */,
+				E9D6D96D2F36F4E8007C64DE /* FirebaseStorage in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +91,11 @@
 			);
 			name = better;
 			packageProductDependencies = (
+				E9D6D9682F36F4E8007C64DE /* FirebaseAuth */,
+				E9D6D96A2F36F4E8007C64DE /* FirebaseFirestore */,
+				E9D6D96C2F36F4E8007C64DE /* FirebaseStorage */,
+				E9D6D96F2F36F505007C64DE /* GoogleSignIn */,
+				E9D6D9712F36F505007C64DE /* GoogleSignInSwift */,
 			);
 			productName = better;
 			productReference = E9D6D76A2F3569FE007C64DE /* better.app */;
@@ -94,6 +125,10 @@
 			);
 			mainGroup = E9D6D7612F3569FE007C64DE;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E9D6D9672F36F4E8007C64DE /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+				E9D6D96E2F36F505007C64DE /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E9D6D76B2F3569FE007C64DE /* Products */;
 			projectDirPath = "";
@@ -256,6 +291,7 @@
 				DEVELOPMENT_TEAM = T44FP8YU5S;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = better/Info.plist;
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save images from conversations to your photo library.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -289,6 +325,7 @@
 				DEVELOPMENT_TEAM = T44FP8YU5S;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = better/Info.plist;
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save images from conversations to your photo library.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -334,6 +371,53 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E9D6D9672F36F4E8007C64DE /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.9.0;
+			};
+		};
+		E9D6D96E2F36F505007C64DE /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/google/GoogleSignIn-iOS";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.1.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		E9D6D9682F36F4E8007C64DE /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E9D6D9672F36F4E8007C64DE /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
+		};
+		E9D6D96A2F36F4E8007C64DE /* FirebaseFirestore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E9D6D9672F36F4E8007C64DE /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFirestore;
+		};
+		E9D6D96C2F36F4E8007C64DE /* FirebaseStorage */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E9D6D9672F36F4E8007C64DE /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseStorage;
+		};
+		E9D6D96F2F36F505007C64DE /* GoogleSignIn */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E9D6D96E2F36F505007C64DE /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignIn;
+		};
+		E9D6D9712F36F505007C64DE /* GoogleSignInSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E9D6D96E2F36F505007C64DE /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignInSwift;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = E9D6D7622F3569FE007C64DE /* Project object */;
 }

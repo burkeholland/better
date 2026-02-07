@@ -13,7 +13,7 @@ final class AuthService {
     var isSignedIn: Bool { currentUser != nil }
     var userId: String? { currentUser?.uid }
 
-    private var authStateHandle: AuthStateDidChangeListenerHandle?
+    nonisolated(unsafe) private var authStateHandle: AuthStateDidChangeListenerHandle?
 
     init() {
         authStateHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in

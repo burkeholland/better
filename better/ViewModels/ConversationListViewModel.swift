@@ -9,7 +9,7 @@ final class ConversationListViewModel {
     var selectedConversation: Conversation?
 
     private let firestoreService = FirestoreService()
-    private var listener: ListenerRegistration?
+    nonisolated(unsafe) private var listener: ListenerRegistration?
     private let userId: String
 
     init(userId: String) {
@@ -27,9 +27,8 @@ final class ConversationListViewModel {
 
     func createConversation() -> Conversation {
         let conversation = Conversation()
-        Task {
-            try? await firestoreService.createConversation(conversation, userId: userId)
-        }
+        // Don't write to Firestore yet — ChatViewModel.send() creates
+        // the doc on first message, avoiding empty conversations.
         selectedConversation = conversation
         Haptics.light()
         return conversation

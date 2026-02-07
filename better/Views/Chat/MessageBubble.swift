@@ -3,6 +3,11 @@ import UIKit
 import AVKit
 import Photos
 
+struct IdentifiableImage: Identifiable {
+    let id = UUID()
+    let image: UIImage
+}
+
 struct MessageBubble: View {
     let message: Message
     let isStreaming: Bool
@@ -17,7 +22,7 @@ struct MessageBubble: View {
     @State private var editText = ""
     @State private var showStreamingCursor = false
     @State private var didAppear = false
-    @State private var showImageViewer = false
+    @State private var selectedImage: IdentifiableImage?
     @State private var loadedImage: UIImage?
 
     var body: some View {
@@ -97,6 +102,14 @@ struct MessageBubble: View {
 }
 
 private extension MessageBubble {
+    static func decodeDataURI(_ uri: String) -> UIImage? {
+        // Expected format: data:<mimeType>;base64,<data>
+        guard let commaIndex = uri.firstIndex(of: ",") else { return nil }
+        let base64String = String(uri[uri.index(after: commaIndex)...])
+        guard let data = Data(base64Encoded: base64String) else { return nil }
+        return UIImage(data: data)
+    }
+
     var messageRow: some View {
         Group {
             if message.isUser {
@@ -142,10 +155,30 @@ private extension MessageBubble {
                 ThinkingView()
             }
 
-            if let urlString = message.mediaURL, let url = URL(string: urlString) {
-                if message.mediaMimeType == "video/mp4" {
+            if let urlString = message.mediaURL {
+                if message.mediaMimeType == "video/mp4", let url = URL(string: urlString) {
                     VideoBubble(videoURL: url, messageId: message.id)
-                } else {
+                } else if urlString.hasPrefix("file://"),
+                          let fileURL = URL(string: urlString),
+                          let uiImage = UIImage(contentsOfFile: fileURL.path) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxHeight: 300)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .onTapGesture {
+                            selectedImage = IdentifiableImage(image: uiImage)
+                        }
+                } else if urlString.hasPrefix("data:"), let uiImage = Self.decodeDataURI(urlString) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxHeight: 300)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .onTapGesture {
+                            selectedImage = IdentifiableImage(image: uiImage)
+                        }
+                } else if let url = URL(string: urlString) {
                     AsyncImage(url: url) { phase in
                         switch phase {
                         case .success(let image):
@@ -155,7 +188,9 @@ private extension MessageBubble {
                                 .frame(maxHeight: 300)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 .onTapGesture {
-                                    showImageViewer = true
+                                    if let img = loadedImage {
+                                        selectedImage = IdentifiableImage(image: img)
+                                    }
                                 }
                         case .failure:
                             Label("Image failed to load", systemImage: "photo")
@@ -166,16 +201,11 @@ private extension MessageBubble {
                                 .frame(height: 200)
                         }
                     }
-                    .fullScreenCover(isPresented: $showImageViewer) {
-                        if let uiImage = loadedImage {
-                            ImageViewer(image: uiImage)
-                        }
-                    }
                     .task {
                         if loadedImage == nil {
                             do {
                                 let (data, _) = try await URLSession.shared.data(from: url)
-                                loadedImage = UIImage(data: data)
+                                await MainActor.run { loadedImage = UIImage(data: data) }
                             } catch { }
                         }
                     }
@@ -198,6 +228,9 @@ private extension MessageBubble {
             if let input = message.inputTokens, let output = message.outputTokens {
                 tokenCounts(input: input, output: output, cached: message.cachedTokens)
             }
+        }
+        .fullScreenCover(item: $selectedImage) { item in
+            ImageViewer(image: item.image)
         }
     }
 
@@ -440,23 +473,30 @@ struct VideoBubble: View {
     }
 
     private func saveToPhotos() {
-        // Download video to temp file then save to photos
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(messageId).mp4")
 
         Task {
             do {
-                let (data, _) = try await URLSession.shared.data(from: videoURL)
-                try data.write(to: tempURL)
+                let saveURL: URL
+                if videoURL.isFileURL {
+                    // Local file — use it directly, no download needed
+                    saveURL = videoURL
+                } else {
+                    // Remote URL — download to temp file first
+                    let (data, _) = try await URLSession.shared.data(from: videoURL)
+                    try data.write(to: tempURL)
+                    saveURL = tempURL
+                }
 
                 let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
                 switch status {
                 case .authorized, .limited:
-                    performSave(fileURL: tempURL)
+                    performSave(fileURL: saveURL)
                 case .notDetermined:
                     let newStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
                     if newStatus == .authorized || newStatus == .limited {
-                        performSave(fileURL: tempURL)
+                        performSave(fileURL: saveURL)
                     } else {
                         await MainActor.run {
                             saveErrorMessage = "Please enable photo library access in Settings to save videos."
@@ -491,7 +531,12 @@ struct VideoBubble: View {
                     saveErrorMessage = error?.localizedDescription ?? "Failed to save video"
                     showingSaveError = true
                 }
-                try? FileManager.default.removeItem(at: fileURL)
+                // Only clean up temp files, not original local files
+                if !fileURL.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
+                    // Skip removal — it's the original file
+                } else {
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
             }
         }
     }

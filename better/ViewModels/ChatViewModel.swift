@@ -15,7 +15,7 @@ final class ChatViewModel {
     private let firestoreService = FirestoreService()
     private let userId: String
     private var streamTask: Task<Void, Never>?
-    private var messagesListener: ListenerRegistration?
+    nonisolated(unsafe) private var messagesListener: ListenerRegistration?
 
     init(conversation: Conversation, userId: String) {
         self.conversation = conversation
@@ -133,8 +133,8 @@ final class ChatViewModel {
         streamTask?.cancel()
         streamTask = nil
 
-        // Persist partial response if it has content
-        if let finalMessage = streamingMessage, !finalMessage.content.isEmpty {
+        // Persist partial response if it has meaningful data
+        if let finalMessage = streamingMessage, Self.hasPeristableContent(finalMessage) {
             Task {
                 try? await firestoreService.addMessage(finalMessage, conversationId: conversation.id, userId: userId)
             }
@@ -142,6 +142,14 @@ final class ChatViewModel {
 
         streamingMessage = nil
         isGenerating = false
+    }
+
+    /// Returns true if the message has text, media, or thinking content worth saving.
+    private static func hasPeristableContent(_ msg: Message) -> Bool {
+        let hasText = !msg.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasMedia = msg.mediaURL != nil
+        let hasThinking = !(msg.thinkingContent?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        return hasText || hasMedia || hasThinking
     }
 
     // MARK: - Regenerate
@@ -285,7 +293,10 @@ final class ChatViewModel {
     // MARK: - Streaming
 
     private func startStreamingResponse(payloads: [MessagePayload], parentId: String?, smartTitleUserText: String? = nil) {
-        streamingMessage = Message(role: "model", content: "", parentId: parentId)
+        let assistantMessage = Message(role: "model", content: "", parentId: parentId)
+        let assistantMessageId = assistantMessage.id
+        let conversationId = conversation.id
+        streamingMessage = assistantMessage
 
         let stream = apiClient.streamContent(
             messages: payloads,
@@ -297,15 +308,19 @@ final class ChatViewModel {
 
         streamTask = Task {
             for await event in stream {
+                if Task.isCancelled { break }
+                // Only mutate if our message is still the active streaming message
+                guard self.streamingMessage?.id == assistantMessageId else { continue }
+
                 switch event {
                 case .text(let text):
                     self.streamingMessage?.content += text
                 case .thinking(let thought):
                     self.streamingMessage?.thinkingContent = (self.streamingMessage?.thinkingContent ?? "") + thought
                 case .imageData(let data, let mimeType):
-                    await self.uploadStreamingMedia(data: data, mimeType: mimeType)
+                    await self.uploadStreamingMedia(data: data, mimeType: mimeType, messageId: assistantMessageId, conversationId: conversationId)
                 case .functionCall(let name, let args):
-                    await self.handleFunctionCall(name: name, args: args)
+                    await self.handleFunctionCall(name: name, args: args, messageId: assistantMessageId, conversationId: conversationId)
                 case .usageMetadata(let input, let output, let cached):
                     self.streamingMessage?.inputTokens = input
                     self.streamingMessage?.outputTokens = output
@@ -316,6 +331,11 @@ final class ChatViewModel {
                     break
                 }
             }
+
+            // If cancelled (e.g. stopGenerating was called), do NOT persist — stopGenerating handles that.
+            guard !Task.isCancelled else { return }
+            // If our message was replaced by a newer stream, bail out.
+            guard self.streamingMessage?.id == assistantMessageId else { return }
 
             let responseContent = self.streamingMessage?.content ?? ""
             await self.persistStreamingMessage()
@@ -334,21 +354,37 @@ final class ChatViewModel {
         }
     }
 
-    private func uploadStreamingMedia(data: Data, mimeType: String) async {
-        guard let msgId = streamingMessage?.id else { return }
+    private func uploadStreamingMedia(data: Data, mimeType: String, messageId: String, conversationId: String) async {
+        // Only set media on the matching streaming message
+        guard streamingMessage?.id == messageId else { return }
+
+        let ext: String
+        switch mimeType {
+        case "image/png":  ext = "png"
+        case "image/webp": ext = "webp"
+        case "video/mp4":  ext = "mp4"
+        default:           ext = "jpg"
+        }
+
+        let mediaDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("media")
+            .appendingPathComponent(conversationId)
+
         do {
-            let url = try await firestoreService.uploadMedia(
-                data: data, mimeType: mimeType,
-                userId: userId, conversationId: conversation.id, messageId: msgId
-            )
-            streamingMessage?.mediaURL = url
+            try FileManager.default.createDirectory(at: mediaDir, withIntermediateDirectories: true)
+            let fileURL = mediaDir.appendingPathComponent("\(messageId).\(ext)")
+            try data.write(to: fileURL)
+            streamingMessage?.mediaURL = fileURL.absoluteString
             streamingMessage?.mediaMimeType = mimeType
         } catch {
-            streamingMessage?.content += "\n[Media upload failed: \(error.localizedDescription)]"
+            // Fall back to data URI if disk write fails
+            let base64 = data.base64EncodedString()
+            streamingMessage?.mediaURL = "data:\(mimeType);base64,\(base64)"
+            streamingMessage?.mediaMimeType = mimeType
         }
     }
 
-    private func handleFunctionCall(name: String, args: [String: String]) async {
+    private func handleFunctionCall(name: String, args: [String: String], messageId: String, conversationId: String) async {
         if name == "generate_image", let prompt = args["prompt"] {
             let imageModel = conversation.modelName == Constants.Models.pro
                 ? Constants.Models.proImage
@@ -378,14 +414,16 @@ final class ChatViewModel {
                     for part in parts {
                         if let inlineData = part.inlineData,
                            let data = Data(base64Encoded: inlineData.data) {
-                            await uploadStreamingMedia(data: data, mimeType: inlineData.mimeType)
+                            await uploadStreamingMedia(data: data, mimeType: inlineData.mimeType, messageId: messageId, conversationId: conversationId)
                         }
                         if let text = part.text {
+                            guard self.streamingMessage?.id == messageId else { continue }
                             streamingMessage?.content += text
                         }
                     }
                 }
             } catch {
+                guard self.streamingMessage?.id == messageId else { return }
                 streamingMessage?.content += "\n[Image generation failed: \(error.localizedDescription)]"
             }
         } else if name == "generate_video", let prompt = args["prompt"] {
@@ -396,15 +434,16 @@ final class ChatViewModel {
                     prompt: prompt,
                     aspectRatio: aspectRatio
                 )
-                await uploadStreamingMedia(data: videoData, mimeType: "video/mp4")
+                await uploadStreamingMedia(data: videoData, mimeType: "video/mp4", messageId: messageId, conversationId: conversationId)
             } catch {
+                guard self.streamingMessage?.id == messageId else { return }
                 streamingMessage?.content += "\n[Video generation failed: \(error.localizedDescription)]"
             }
         }
     }
 
     private func persistStreamingMessage() async {
-        guard let finalMessage = streamingMessage else { return }
+        guard let finalMessage = streamingMessage, Self.hasPeristableContent(finalMessage) else { return }
         do {
             try await firestoreService.addMessage(finalMessage, conversationId: conversation.id, userId: userId)
         } catch {
