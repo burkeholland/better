@@ -37,7 +37,10 @@ struct Message: Codable, Identifiable, Equatable, Hashable {
     var isUser: Bool { role == "user" }
 
     /// Whether this message has an image attachment
-    var hasImage: Bool { mediaURL != nil }
+    var hasImage: Bool { mediaMimeType?.hasPrefix("image/") == true }
+
+    /// Whether this message has a PDF attachment
+    var isPDF: Bool { mediaMimeType == "application/pdf" }
 
     /// Whether this message has any media attachment
     var hasMedia: Bool { mediaURL != nil }

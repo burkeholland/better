@@ -8,6 +8,11 @@ struct IdentifiableImage: Identifiable {
     let image: UIImage
 }
 
+struct IdentifiableURL: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 struct MessageBubble: View {
     let message: Message
     let isStreaming: Bool
@@ -24,6 +29,8 @@ struct MessageBubble: View {
     @State private var didAppear = false
     @State private var selectedImage: IdentifiableImage?
     @State private var loadedImage: UIImage?
+    @State private var imageLoadFailed = false
+    @State private var selectedPDF: IdentifiableURL?
 
     var body: some View {
         VStack(alignment: message.isUser ? .trailing : .leading, spacing: 8) {
@@ -156,7 +163,9 @@ private extension MessageBubble {
             }
 
             if let urlString = message.mediaURL {
-                if message.mediaMimeType == "video/mp4", let url = URL(string: urlString) {
+                if message.isPDF, let url = URL(string: urlString) {
+                    pdfCard(url: url)
+                } else if message.mediaMimeType == "video/mp4", let url = URL(string: urlString) {
                     VideoBubble(videoURL: url, messageId: message.id)
                 } else if urlString.hasPrefix("file://"),
                           let fileURL = URL(string: urlString),
@@ -179,34 +188,36 @@ private extension MessageBubble {
                             selectedImage = IdentifiableImage(image: uiImage)
                         }
                 } else if let url = URL(string: urlString) {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
+                    Group {
+                        if let loadedImage {
+                            Image(uiImage: loadedImage)
                                 .resizable()
                                 .scaledToFit()
                                 .frame(maxHeight: 300)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 .onTapGesture {
-                                    if let img = loadedImage {
-                                        selectedImage = IdentifiableImage(image: img)
-                                    }
+                                    selectedImage = IdentifiableImage(image: loadedImage)
                                 }
-                        case .failure:
+                        } else if imageLoadFailed {
                             Label("Image failed to load", systemImage: "photo")
                                 .foregroundStyle(.secondary)
-                        default:
+                        } else {
                             ProgressView()
                                 .frame(maxWidth: .infinity)
                                 .frame(height: 200)
                         }
                     }
                     .task {
-                        if loadedImage == nil {
-                            do {
-                                let (data, _) = try await URLSession.shared.data(from: url)
-                                await MainActor.run { loadedImage = UIImage(data: data) }
-                            } catch { }
+                        guard loadedImage == nil else { return }
+                        do {
+                            let (data, _) = try await URLSession.shared.data(from: url)
+                            if let image = UIImage(data: data) {
+                                loadedImage = image
+                            } else {
+                                imageLoadFailed = true
+                            }
+                        } catch {
+                            imageLoadFailed = true
                         }
                     }
                 }
@@ -231,6 +242,9 @@ private extension MessageBubble {
         }
         .fullScreenCover(item: $selectedImage) { item in
             ImageViewer(image: item.image)
+        }
+        .fullScreenCover(item: $selectedPDF) { item in
+            PDFViewer(url: item.url)
         }
     }
 
@@ -257,6 +271,38 @@ private extension MessageBubble {
                 .font(.caption2)
                 .foregroundStyle(Theme.charcoal.opacity(0.6))
         }
+    }
+
+    func pdfCard(url: URL) -> some View {
+        HStack(spacing: 16) {
+            Image(systemName: "doc.fill")
+                .font(.system(size: 30))
+                .gradientIcon()
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(.white))
+                .shadow(color: Theme.bubbleShadowColor, radius: 2, y: 1)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(url.lastPathComponent)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.charcoal)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                
+                Text("PDF Document")
+                    .font(.caption)
+                    .foregroundStyle(Theme.charcoal.opacity(0.6))
+            }
+            
+            Spacer()
+        }
+        .padding(12)
+        .background(Theme.cream)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture {
+            selectedPDF = IdentifiableURL(url: url)
+        }
+        .frame(maxWidth: 300)
     }
 
     var editView: some View {
@@ -300,7 +346,10 @@ private extension MessageBubble {
     }
 
     var userBubbleMaxWidth: CGFloat {
-        UIScreen.main.bounds.width * 0.8
+        let width = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.bounds.width }
+            .first ?? 393
+        return width * 0.8
     }
 
     func startStreamingAnimation() {
@@ -519,24 +568,21 @@ struct VideoBubble: View {
     }
 
     private func performSave(fileURL: URL) {
-        PHPhotoLibrary.shared().performChanges {
-            PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
-        } completionHandler: { success, error in
-            DispatchQueue.main.async {
-                if success {
-                    withAnimation {
-                        showingSaveSuccess = true
-                    }
-                } else {
-                    saveErrorMessage = error?.localizedDescription ?? "Failed to save video"
-                    showingSaveError = true
+        Task {
+            do {
+                try await PHPhotoLibrary.shared().performChanges {
+                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
                 }
-                // Only clean up temp files, not original local files
-                if !fileURL.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
-                    // Skip removal — it's the original file
-                } else {
-                    try? FileManager.default.removeItem(at: fileURL)
+                withAnimation {
+                    showingSaveSuccess = true
                 }
+            } catch {
+                saveErrorMessage = error.localizedDescription
+                showingSaveError = true
+            }
+            // Clean up temp files only
+            if fileURL.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
+                try? FileManager.default.removeItem(at: fileURL)
             }
         }
     }

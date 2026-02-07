@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 import FirebaseFirestore
 
 @MainActor
@@ -10,9 +11,11 @@ final class ChatViewModel {
     var errorMessage: String?
     var streamingMessage: Message?
     var messages: [Message] = []
+    var pendingAttachment: PendingAttachment?
 
     private let apiClient = GeminiAPIClient()
     private let firestoreService = FirestoreService()
+    private let mediaService = MediaService.shared
     private let userId: String
     private var streamTask: Task<Void, Never>?
     nonisolated(unsafe) private var messagesListener: ListenerRegistration?
@@ -82,22 +85,106 @@ final class ChatViewModel {
         try? await firestoreService.updateConversation(conversation, userId: userId)
     }
 
+    // MARK: - Attachments
+
+    func attachImage(item: PhotosPickerItem) async {
+        errorMessage = nil
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self) else {
+                errorMessage = "Could not load selected image."
+                return
+            }
+
+            // Determine MIME type from the supported content types
+            let mimeType: String
+            if let contentType = item.supportedContentTypes.first,
+               let mime = MediaTypes.mimeType(from: contentType) {
+                mimeType = mime
+            } else {
+                mimeType = "image/jpeg"
+            }
+
+            try MediaTypes.validate(mimeType: mimeType, dataSize: data.count)
+
+            let preview = UIImage(data: data)
+            pendingAttachment = PendingAttachment(
+                data: data,
+                mimeType: mimeType,
+                preview: preview,
+                filename: nil
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func attachPDF(url: URL) async {
+        errorMessage = nil
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let mimeType = SupportedMediaType.pdf.rawValue
+            try MediaTypes.validate(mimeType: mimeType, dataSize: data.count)
+
+            pendingAttachment = PendingAttachment(
+                data: data,
+                mimeType: mimeType,
+                preview: nil,
+                filename: url.lastPathComponent
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removePendingAttachment() {
+        pendingAttachment = nil
+    }
+
     // MARK: - Send
 
     func send(text: String) async {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty || pendingAttachment != nil else { return }
 
         isGenerating = true
         errorMessage = nil
 
         let parentId = activeBranch.last?.id
-        let userMessage = Message(role: "user", content: text, parentId: parentId)
+        var userMessage = Message(role: "user", content: text, parentId: parentId)
+
+        // Handle pending attachment upload
+        let attachment = pendingAttachment
+        if let attachment {
+            do {
+                let downloadURL = try await firestoreService.uploadMedia(
+                    data: attachment.data,
+                    mimeType: attachment.mimeType,
+                    userId: userId,
+                    conversationId: conversation.id,
+                    messageId: userMessage.id
+                )
+                userMessage.mediaURL = downloadURL
+                userMessage.mediaMimeType = attachment.mimeType
+            } catch {
+                errorMessage = error.localizedDescription
+                isGenerating = false
+                return  // Keep pendingAttachment so user can retry
+            }
+        }
 
         let isNew = messages.isEmpty
 
         if conversation.title == "New Chat" {
-            conversation.title = String(text.prefix(40))
+            if text.isEmpty, let attachment {
+                conversation.title = attachment.mimeType.hasPrefix("image/")
+                    ? "Image"
+                    : "PDF: \(attachment.filename ?? "document")"
+            } else {
+                conversation.title = String(text.prefix(40))
+            }
         }
         conversation.updatedAt = Date()
 
@@ -114,17 +201,19 @@ final class ChatViewModel {
             return
         }
 
+        // Clear attachment after successful send
+        pendingAttachment = nil
+
         // Build payloads — include user message in case listener hasn't fired yet
         var currentBranch = activeBranch
         if !currentBranch.contains(where: { $0.id == userMessage.id }) {
             currentBranch.append(userMessage)
         }
 
-        let payloads = currentBranch.map { msg in
-            MessagePayload(role: msg.role, text: msg.content, imageData: nil, imageMimeType: nil)
-        }
+        let payloads = await buildPayloads(for: currentBranch)
 
-        startStreamingResponse(payloads: payloads, parentId: userMessage.id, smartTitleUserText: text)
+        let smartTitleText = text.isEmpty ? nil : text
+        startStreamingResponse(payloads: payloads, parentId: userMessage.id, smartTitleUserText: smartTitleText)
     }
 
     // MARK: - Stop
@@ -165,9 +254,7 @@ final class ChatViewModel {
         guard let index = branch.firstIndex(where: { $0.id == message.id }) else { return }
         let messagesUpToParent = Array(branch.prefix(index))
 
-        let payloads = messagesUpToParent.map { msg in
-            MessagePayload(role: msg.role, text: msg.content, imageData: nil, imageMimeType: nil)
-        }
+        let payloads = await buildPayloads(for: messagesUpToParent)
 
         startStreamingResponse(payloads: payloads, parentId: parentId)
     }
@@ -223,9 +310,7 @@ final class ChatViewModel {
             }
         }
 
-        let payloads = chain.map { msg in
-            MessagePayload(role: msg.role, text: msg.content, imageData: nil, imageMimeType: nil)
-        }
+        let payloads = await buildPayloads(for: chain)
 
         startStreamingResponse(payloads: payloads, parentId: userMessage.id)
     }
@@ -390,7 +475,7 @@ final class ChatViewModel {
                 ? Constants.Models.proImage
                 : Constants.Models.flashImage
 
-            let imagePayloads = [MessagePayload(role: "user", text: prompt, imageData: nil, imageMimeType: nil)]
+            let imagePayloads = [MessagePayload(role: "user", text: prompt, mediaData: nil, mediaMimeType: nil)]
             let imageConfig = GenerationConfig(
                 temperature: conversation.temperature,
                 topP: conversation.topP,
@@ -471,14 +556,43 @@ final class ChatViewModel {
         )
     }
 
+    private func buildPayloads(for messages: [Message]) async -> [MessagePayload] {
+        var payloads: [MessagePayload] = []
+        for msg in messages {
+            var mediaData: Data? = nil
+            var mediaMime: String? = nil
+
+            if let urlString = msg.mediaURL, let mimeType = msg.mediaMimeType {
+                if MediaTypes.isSupported(mimeType) {
+                    let maxBytes = MediaLimits.maxBytes(for: mimeType)
+                    do {
+                        mediaData = try await mediaService.downloadMedia(from: urlString, maxBytes: maxBytes)
+                        mediaMime = mimeType
+                    } catch {
+                        // Log but don't block the request — send without media
+                        print("Failed to download media for message \(msg.id): \(error.localizedDescription)")
+                    }
+                }
+            }
+
+            payloads.append(MessagePayload(
+                role: msg.role,
+                text: msg.content,
+                mediaData: mediaData,
+                mediaMimeType: mediaMime
+            ))
+        }
+        return payloads
+    }
+
     private func generateSmartTitle(userText: String, responseText: String) async {
         let truncated = String(userText.prefix(40))
         guard conversation.title == truncated else { return }
 
         let preview = String(responseText.prefix(200))
         let titleMessages = [
-            MessagePayload(role: "user", text: userText, imageData: nil, imageMimeType: nil),
-            MessagePayload(role: "model", text: preview, imageData: nil, imageMimeType: nil)
+            MessagePayload(role: "user", text: userText, mediaData: nil, mediaMimeType: nil),
+            MessagePayload(role: "model", text: preview, mediaData: nil, mediaMimeType: nil)
         ]
 
         let config = GenerationConfig(

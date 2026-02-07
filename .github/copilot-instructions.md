@@ -49,13 +49,25 @@ Messages form a tree via `parentId`. The active branch is computed by walking ch
 - `.functionCall(name, args)` - Tool calls (image/video generation)
 - `.usageMetadata(inputTokens, outputTokens, cachedTokens)` - Token counts
 
+### Media Attachments
+[MediaService.swift](../better/Services/MediaService.swift) and [MediaTypes.swift](../better/Utilities/MediaTypes.swift) handle file uploads:
+- **Supported formats**: Images (PNG, JPEG, WEBP, HEIC, HEIF), PDFs
+- **Size limits**: 15MB for images, 10MB for PDFs (conservative for base64 encoding)
+- **Upload flow**: User selects → validate → upload to Firebase Storage → store URL in Message
+- **Send flow**: Download media bytes from Storage URLs → send as inline data to Gemini API
+- **Caching**: MediaService maintains in-memory cache to avoid re-downloading on regenerate
+- **UI**: PhotosPicker for images, fileImporter for PDFs, preview in MessageInput before sending
+
 ### Firebase Data Structure
 ```
 users/{userId}/
   conversations/{conversationId}/
     messages/{messageId}
+
+media/{userId}/{conversationId}/{messageId}
+  - Uploaded media files (images, PDFs)
 ```
-See [firestore.rules](../firestore.rules) - users can only access their own data.
+See [firestore.rules](../firestore.rules) and [storage.rules](../storage.rules) - users can only access their own data.
 
 ### Theme System
 [Theme.swift](../better/Utilities/Theme.swift) defines the PostrBoard-inspired color palette with semantic colors (`Theme.peach`, `Theme.mint`, `Theme.lavender`) and gradients. Use these instead of raw colors:
@@ -79,6 +91,8 @@ See [firestore.rules](../firestore.rules) - users can only access their own data
 - `GenerationConfig` struct for model parameters (temperature, topP, topK, maxOutputTokens, thinkingBudget)
 - `ToolsConfig` for enabling Google Search, code execution, URL context, image/video generation
 - Returns `AsyncStream<StreamEvent>` for streaming
+- `MessagePayload` with `mediaData`/`mediaMimeType` for attaching images and PDFs
+- **Media ordering**: Place media parts before text parts in request (Gemini recommendation)
 
 ### Error Handling
 - Use `GeminiAPIError` enum for API errors with `LocalizedError` conformance

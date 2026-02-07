@@ -1,27 +1,27 @@
 import SwiftUI
+import PhotosUI
+import UniformTypeIdentifiers
 
 struct MessageInput: View {
-    @Binding var text: String
-    @Binding var isProMode: Bool
-    let isGenerating: Bool
-    let onSend: () -> Void
-    let onStop: () -> Void
+    @Bindable var viewModel: ChatViewModel
 
     @FocusState private var isFocused: Bool
+    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var isFileImporterPresented = false
 
     private var canSend: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isGenerating
+        (!viewModel.messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.pendingAttachment != nil) && !viewModel.isGenerating
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button(action: {
-                isProMode.toggle()
+                viewModel.isProMode.toggle()
                 Haptics.light()
             }) {
                 HStack(spacing: 4) {
                     Group {
-                        if isProMode {
+                        if viewModel.isProMode {
                             Image(systemName: "sparkles")
                             Text("Pro")
                         } else {
@@ -35,12 +35,12 @@ struct MessageInput: View {
                         .font(.caption2.weight(.bold))
                         .opacity(0.5)
                 }
-                .foregroundStyle(isProMode ? Theme.cream : Theme.charcoal.opacity(0.6))
+                .foregroundStyle(viewModel.isProMode ? Theme.cream : Theme.charcoal.opacity(0.6))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(
                     Capsule()
-                        .fill(isProMode ? AnyShapeStyle(Theme.accentGradient) : AnyShapeStyle(Theme.lavender.opacity(0.15)))
+                        .fill(viewModel.isProMode ? AnyShapeStyle(Theme.accentGradient) : AnyShapeStyle(Theme.lavender.opacity(0.15)))
                 )
             }
             .buttonStyle(.plain)
@@ -48,8 +48,96 @@ struct MessageInput: View {
             .padding(.top, 10)
             .padding(.bottom, 8)
 
+            // Preview Area
+            if let attachment = viewModel.pendingAttachment {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        if let preview = attachment.preview {
+                            Image(uiImage: preview)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(height: 60)
+                                .clipShape(RoundedRectangle(cornerRadius: Theme.smallRadius))
+                                .overlay(alignment: .topTrailing) {
+                                    removeButton
+                                        .offset(x: 10, y: -10)
+                                }
+                        } else {
+                            HStack(spacing: 6) {
+                                Image(systemName: "doc.fill")
+                                    .font(.system(size: 20))
+                                    .gradientIcon()
+                                Text(attachment.filename ?? "Document")
+                                    .font(.callout)
+                                    .foregroundStyle(Theme.charcoal)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: 150)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Theme.lavender.opacity(0.15))
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.smallRadius))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Theme.smallRadius)
+                                    .stroke(Theme.lavender.opacity(0.3), lineWidth: 1)
+                            )
+                            .overlay(alignment: .topTrailing) {
+                                removeButton
+                                    .offset(x: 10, y: -10)
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             HStack(alignment: .bottom, spacing: 12) {
-                TextField("Message...", text: $text)
+                // Pickers
+                PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 20))
+                }
+                .buttonStyle(PickerButtonStyle())
+                .disabled(viewModel.isGenerating)
+                .padding(.bottom, 8)
+                .accessibilityLabel("Attach Photo")
+                .onChange(of: selectedPhotoItem) { _, newItem in
+                    if let newItem {
+                        Task {
+                            await viewModel.attachImage(item: newItem)
+                            selectedPhotoItem = nil
+                        }
+                    }
+                }
+
+                Button {
+                    isFileImporterPresented = true
+                } label: {
+                    Image(systemName: "doc")
+                        .font(.system(size: 20))
+                }
+                .buttonStyle(PickerButtonStyle())
+                .disabled(viewModel.isGenerating)
+                .padding(.bottom, 8)
+                .accessibilityLabel("Attach Document")
+                .fileImporter(
+                    isPresented: $isFileImporterPresented,
+                    allowedContentTypes: [.pdf],
+                    allowsMultipleSelection: false
+                ) { result in
+                    switch result {
+                    case .success(let urls):
+                        if let url = urls.first {
+                            Task { await viewModel.attachPDF(url: url) }
+                        }
+                    case .failure(let error):
+                        viewModel.errorMessage = error.localizedDescription
+                    }
+                }
+
+                TextField("Message...", text: $viewModel.messageText)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -61,14 +149,13 @@ struct MessageInput: View {
                     .focused($isFocused)
                     .onSubmit {
                         if canSend {
-                            onSend()
-                            Haptics.light()
+                            send()
                         }
                     }
                     .submitLabel(.send)
 
-                if isGenerating {
-                    Button(action: onStop) {
+                if viewModel.isGenerating {
+                    Button(action: { viewModel.stopGenerating() }) {
                         Image(systemName: "stop.fill")
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(Theme.cream)
@@ -79,8 +166,7 @@ struct MessageInput: View {
                     .buttonStyle(.plain)
                 } else {
                     Button {
-                        onSend()
-                        Haptics.light()
+                        send()
                     } label: {
                         Image(systemName: "arrow.up")
                             .font(.system(size: 15, weight: .semibold))
@@ -100,6 +186,32 @@ struct MessageInput: View {
                 .frame(height: 1)
                 .foregroundStyle(Theme.lavender.opacity(0.2))
         }
+    }
+
+    private var removeButton: some View {
+        Button {
+            withAnimation {
+                viewModel.removePendingAttachment()
+            }
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(Theme.cream)
+                    .frame(width: 24, height: 24)
+                
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 24))
+                    .foregroundStyle(Theme.charcoal.opacity(0.6))
+            }
+        }
+        .frame(width: 44, height: 44)
+    }
+
+    private func send() {
+        let text = viewModel.messageText
+        viewModel.messageText = ""
+        Task { await viewModel.send(text: text) }
+        Haptics.light()
     }
 }
 
@@ -126,5 +238,13 @@ private struct SendButtonStyle: ButtonStyle {
             .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
             .shadow(color: Theme.inputShadowColor, radius: Theme.inputShadowRadius, x: 0, y: Theme.inputShadowY)
             .opacity(isEnabled ? 1.0 : 0.6)
+    }
+}
+
+private struct PickerButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(configuration.isPressed ? Theme.mint : Theme.charcoal.opacity(0.6))
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
     }
 }

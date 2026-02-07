@@ -3,7 +3,6 @@ import SwiftUI
 struct ChatView: View {
     @Bindable var viewModel: ChatViewModel
     @Binding var showChatSettings: Bool
-    @State private var messageText = ""
     @State private var isNearBottom = true
     @State private var scrollViewHeight: CGFloat = 0
     @State private var bottomAnchorY: CGFloat = 0
@@ -88,7 +87,7 @@ struct ChatView: View {
                             .onAppear {
                                 scrollViewHeight = scrollProxy.size.height
                             }
-                            .onChange(of: scrollProxy.size.height) { newValue in
+                            .onChange(of: scrollProxy.size.height) { _, newValue in
                                 scrollViewHeight = newValue
                             }
                     }
@@ -97,7 +96,7 @@ struct ChatView: View {
                     bottomAnchorY = newValue
                     updateIsNearBottom()
                 }
-                .onChange(of: viewModel.displayMessages) { _ in
+                .onChange(of: viewModel.displayMessages.count) { _, _ in
                     let shouldAutoScroll = shouldForceScroll || viewModel.isGenerating || isNearBottom
                     if shouldAutoScroll {
                         scrollToBottom(proxy)
@@ -139,20 +138,7 @@ struct ChatView: View {
                 .padding(.top, 6)
             }
 
-            MessageInput(
-                text: $messageText,
-                isProMode: $viewModel.isProMode,
-                isGenerating: viewModel.isGenerating,
-                onSend: {
-                    let text = messageText
-                    messageText = ""
-                    shouldForceScroll = true
-                    Task { await viewModel.send(text: text) }
-                },
-                onStop: {
-                    viewModel.stopGenerating()
-                }
-            )
+            MessageInput(viewModel: viewModel)
         }
         .adaptiveBackground()
         .navigationTitle(viewModel.conversation.title)
@@ -180,7 +166,7 @@ struct ChatView: View {
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
-        DispatchQueue.main.async {
+        Task { @MainActor in
             if animated {
                 withAnimation(.easeOut(duration: 0.25)) {
                     proxy.scrollTo(bottomAnchorId, anchor: .bottom)

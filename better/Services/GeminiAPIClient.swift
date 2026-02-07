@@ -3,8 +3,8 @@ import Foundation
 struct MessagePayload: Sendable {
     let role: String
     let text: String
-    let imageData: Data?
-    let imageMimeType: String?
+    let mediaData: Data?
+    let mediaMimeType: String?
 }
 
 struct GenerationConfig: Sendable {
@@ -403,14 +403,15 @@ final class GeminiAPIClient {
     private func buildParts(from message: MessagePayload) -> [Part] {
         var parts: [Part] = []
 
-        if !message.text.isEmpty {
-            parts.append(Part(text: message.text, inlineData: nil))
-        }
-
-        if let data = message.imageData, let mimeType = message.imageMimeType {
+        // Media part first per Gemini API recommendations
+        if let data = message.mediaData, let mimeType = message.mediaMimeType {
             let base64 = data.base64EncodedString()
             let inline = InlineData(mimeType: mimeType, data: base64)
             parts.append(Part(text: nil, inlineData: inline))
+        }
+
+        if !message.text.isEmpty {
+            parts.append(Part(text: message.text, inlineData: nil))
         }
 
         return parts
