@@ -1,11 +1,7 @@
 import Foundation
-import SwiftData
 
-@Model
-final class Conversation {
-    #Unique<Conversation>([\.id])
-
-    var id: UUID
+struct Conversation: Codable, Identifiable, Equatable, Hashable {
+    var id: String
     var title: String
     var createdAt: Date
     var updatedAt: Date
@@ -26,10 +22,8 @@ final class Conversation {
     var codeExecutionEnabled: Bool
     var urlContextEnabled: Bool
 
-    @Relationship(deleteRule: .cascade, inverse: \Message.conversation)
-    var messages: [Message]
-
     init(
+        id: String = UUID().uuidString,
         title: String = "New Chat",
         modelName: String = Constants.Models.defaultModel,
         temperature: Double = 1.0,
@@ -37,7 +31,7 @@ final class Conversation {
         topK: Int = 40,
         maxOutputTokens: Int = 8192
     ) {
-        self.id = UUID()
+        self.id = id
         self.title = title
         self.createdAt = Date()
         self.updatedAt = Date()
@@ -51,37 +45,5 @@ final class Conversation {
         self.googleSearchEnabled = false
         self.codeExecutionEnabled = false
         self.urlContextEnabled = false
-        self.messages = []
-    }
-
-    /// Returns the active branch of messages (from root to the most recent leaf on the active path)
-    var activeBranch: [Message] {
-        let sorted = messages.sorted { $0.createdAt < $1.createdAt }
-        guard !sorted.isEmpty else { return [] }
-
-        // Find root messages (no parent)
-        let roots = sorted.filter { $0.parentId == nil }
-        guard let root = roots.last else { return [] }
-
-        // Walk the active branch: for each message, pick the latest child
-        var branch: [Message] = [root]
-        var current = root
-
-        while true {
-            let children = sorted.filter { $0.parentId == current.id }
-            guard let latest = children.max(by: { a, b in
-                (a.selectedAt ?? a.createdAt) < (b.selectedAt ?? b.createdAt)
-            }) else { break }
-            branch.append(latest)
-            current = latest
-        }
-
-        return branch
-    }
-
-    /// Returns sibling messages for a given message (messages with the same parentId)
-    func siblings(of message: Message) -> [Message] {
-        let sorted = messages.sorted { $0.createdAt < $1.createdAt }
-        return sorted.filter { $0.parentId == message.parentId && $0.role == message.role }
     }
 }

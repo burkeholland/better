@@ -1,8 +1,11 @@
 import SwiftUI
 import UIKit
+import AVKit
+import Photos
 
 struct MessageBubble: View {
     let message: Message
+    let isStreaming: Bool
     let branchInfo: (current: Int, total: Int)
     let onRegenerate: () -> Void
     let onEdit: (String) -> Void
@@ -15,6 +18,7 @@ struct MessageBubble: View {
     @State private var showStreamingCursor = false
     @State private var didAppear = false
     @State private var showImageViewer = false
+    @State private var loadedImage: UIImage?
 
     var body: some View {
         VStack(alignment: message.isUser ? .trailing : .leading, spacing: 8) {
@@ -78,12 +82,12 @@ struct MessageBubble: View {
                     didAppear = true
                 }
             }
-            if message.isStreaming {
+            if isStreaming {
                 startStreamingAnimation()
             }
         }
-        .onChange(of: message.isStreaming) { _, isStreaming in
-            if isStreaming {
+        .onChange(of: isStreaming) { _, streaming in
+            if streaming {
                 startStreamingAnimation()
             } else {
                 showStreamingCursor = false
@@ -134,23 +138,48 @@ private extension MessageBubble {
 
     var messageContent: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if message.isStreaming && message.content.isEmpty {
+            if isStreaming && message.content.isEmpty {
                 ThinkingView()
             }
 
-            if let imageData = message.imageData,
-               let uiImage = UIImage(data: imageData) {
-                Image(uiImage: uiImage)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxHeight: 300)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .onTapGesture {
-                        showImageViewer = true
+            if let urlString = message.mediaURL, let url = URL(string: urlString) {
+                if message.mediaMimeType == "video/mp4" {
+                    VideoBubble(videoURL: url, messageId: message.id)
+                } else {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxHeight: 300)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .onTapGesture {
+                                    showImageViewer = true
+                                }
+                        case .failure:
+                            Label("Image failed to load", systemImage: "photo")
+                                .foregroundStyle(.secondary)
+                        default:
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 200)
+                        }
                     }
                     .fullScreenCover(isPresented: $showImageViewer) {
-                        ImageViewer(image: uiImage)
+                        if let uiImage = loadedImage {
+                            ImageViewer(image: uiImage)
+                        }
                     }
+                    .task {
+                        if loadedImage == nil {
+                            do {
+                                let (data, _) = try await URLSession.shared.data(from: url)
+                                loadedImage = UIImage(data: data)
+                            } catch { }
+                        }
+                    }
+                }
             }
 
             if !message.content.isEmpty {
@@ -162,7 +191,7 @@ private extension MessageBubble {
                 }
             }
 
-            if message.isStreaming && !message.content.isEmpty {
+            if isStreaming && !message.content.isEmpty {
                 streamingCursor
             }
 
@@ -243,5 +272,227 @@ private extension MessageBubble {
 
     func startStreamingAnimation() {
         showStreamingCursor = true
+    }
+}
+
+struct VideoBubble: View {
+    let videoURL: URL
+    let messageId: String
+
+    @State private var player: AVPlayer?
+    @State private var isPlaying = false
+    @State private var showFullScreen = false
+
+    @State private var showingShareSheet = false
+    @State private var showingSaveSuccess = false
+    @State private var saveErrorMessage: String?
+    @State private var showingSaveError = false
+
+    var body: some View {
+        ZStack {
+            if let player = player {
+                VideoPlayer(player: player)
+                    .frame(height: 300)
+                    .onReceive(player.publisher(for: \.timeControlStatus)) { status in
+                        isPlaying = status == .playing
+                    }
+            } else {
+                ZStack {
+                    Color.black.opacity(0.1)
+                    ProgressView()
+                }
+                .frame(height: 300)
+            }
+
+            if !isPlaying {
+                ZStack {
+                    Color.black.opacity(0.2)
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 50))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .shadow(radius: 4)
+                }
+                .allowsHitTesting(false)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(alignment: .topTrailing) {
+            Button {
+                showFullScreen = true
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(.ultraThinMaterial)
+                    .clipShape(Circle())
+            }
+            .padding(8)
+            .shadow(radius: 2)
+        }
+        .onAppear {
+            setupPlayer()
+        }
+        .onChange(of: showFullScreen) { _, isShowing in
+            if !isShowing {
+                setupPlayer()
+            }
+        }
+        .fullScreenCover(isPresented: $showFullScreen) {
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                if let player = player {
+                    VideoPlayer(player: player)
+                        .ignoresSafeArea()
+                }
+
+                VStack {
+                    HStack {
+                        Button {
+                            showFullScreen = false
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(10)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+                        .padding()
+
+                        Spacer()
+                    }
+
+                    Spacer()
+
+                    HStack(spacing: 30) {
+                        Button {
+                            showingShareSheet = true
+                        } label: {
+                            actionButton(icon: "square.and.arrow.up", text: "Share")
+                        }
+
+                        Button {
+                            saveToPhotos()
+                        } label: {
+                            actionButton(icon: "square.and.arrow.down", text: "Save")
+                        }
+                    }
+                    .padding(.bottom, 40)
+                }
+            }
+            .sheet(isPresented: $showingShareSheet) {
+                ShareSheet(activityItems: [videoURL])
+            }
+            .overlay {
+                if showingSaveSuccess {
+                    saveSuccessView
+                }
+            }
+            .alert("Save Error", isPresented: $showingSaveError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(saveErrorMessage ?? "Unknown error")
+            }
+        }
+    }
+
+    private func setupPlayer() {
+        guard player == nil else { return }
+        player = AVPlayer(url: videoURL)
+    }
+
+    private func actionButton(icon: String, text: String) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 22))
+            Text(text)
+                .font(.caption)
+        }
+        .foregroundStyle(.white)
+        .frame(width: 60)
+        .padding(8)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var saveSuccessView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(Theme.mint)
+            Text("Saved to Photos")
+                .font(.body.weight(.medium))
+                .foregroundStyle(.white)
+        }
+        .padding(24)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .transition(.opacity.combined(with: .scale))
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                withAnimation {
+                    showingSaveSuccess = false
+                }
+            }
+        }
+    }
+
+    private func saveToPhotos() {
+        // Download video to temp file then save to photos
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(messageId).mp4")
+
+        Task {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: videoURL)
+                try data.write(to: tempURL)
+
+                let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+                switch status {
+                case .authorized, .limited:
+                    performSave(fileURL: tempURL)
+                case .notDetermined:
+                    let newStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+                    if newStatus == .authorized || newStatus == .limited {
+                        performSave(fileURL: tempURL)
+                    } else {
+                        await MainActor.run {
+                            saveErrorMessage = "Please enable photo library access in Settings to save videos."
+                            showingSaveError = true
+                        }
+                    }
+                default:
+                    await MainActor.run {
+                        saveErrorMessage = "Please enable photo library access in Settings to save videos."
+                        showingSaveError = true
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    saveErrorMessage = error.localizedDescription
+                    showingSaveError = true
+                }
+            }
+        }
+    }
+
+    private func performSave(fileURL: URL) {
+        PHPhotoLibrary.shared().performChanges {
+            PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
+        } completionHandler: { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    withAnimation {
+                        showingSaveSuccess = true
+                    }
+                } else {
+                    saveErrorMessage = error?.localizedDescription ?? "Failed to save video"
+                    showingSaveError = true
+                }
+                try? FileManager.default.removeItem(at: fileURL)
+            }
+        }
     }
 }

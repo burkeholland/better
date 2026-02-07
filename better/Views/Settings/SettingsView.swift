@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AppState.self) private var appState
+    @Environment(AuthService.self) private var authService
     @State private var apiKeyText: String = ""
     @State private var hasAPIKey: Bool = false
     @State private var showSavedAlert: Bool = false
@@ -11,6 +12,51 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    if authService.isSignedIn, let user = authService.currentUser {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                Circle()
+                                    .fill(Theme.accentGradient)
+                                    .frame(width: 40, height: 40)
+                                Text(String(user.displayName?.prefix(1) ?? "?"))
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(user.displayName ?? "User")
+                                    .font(.subheadline.weight(.semibold))
+                                if let email = user.email {
+                                    Text(email)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+
+                        Button(role: .destructive) {
+                            try? authService.signOut()
+                        } label: {
+                            HStack {
+                                Image(systemName: "rectangle.portrait.and.arrow.right")
+                                Text("Sign Out")
+                            }
+                        }
+                    }
+                } header: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "person.circle")
+                            .font(.caption)
+                            .foregroundStyle(Theme.accentGradient)
+                        Text("Account")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(Theme.accentGradient)
+                    }
+                }
+
                 Section {
                     if hasAPIKey {
                         HStack {

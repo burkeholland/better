@@ -1,16 +1,39 @@
 import SwiftUI
-import SwiftData
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
+    @Environment(AuthService.self) private var authService
     @Environment(AppState.self) private var appState
 
+    @State private var conversationListVM: ConversationListViewModel?
     @State private var currentConversation: Conversation?
     @State private var chatViewModel: ChatViewModel?
     @State private var showSideMenu = false
     @State private var showChatSettings = false
 
     var body: some View {
+        Group {
+            if authService.isLoading {
+                ProgressView()
+                    .tint(Theme.mint)
+            } else if !authService.isSignedIn {
+                LoginView()
+            } else {
+                mainContent
+            }
+        }
+        .onChange(of: authService.isSignedIn) { _, isSignedIn in
+            if isSignedIn, let userId = authService.userId {
+                conversationListVM = ConversationListViewModel(userId: userId)
+                createNewConversation()
+            } else {
+                conversationListVM = nil
+                currentConversation = nil
+                chatViewModel = nil
+            }
+        }
+    }
+
+    private var mainContent: some View {
         ZStack {
             NavigationStack {
                 Group {
@@ -49,19 +72,22 @@ struct ContentView: View {
             }
             .tint(Theme.lavender)
 
-            SideMenuView(
-                isOpen: $showSideMenu,
-                onSelect: { conversation in
-                    switchToConversation(conversation)
-                },
-                onSettings: {
-                    appState.showSettings = true
-                },
-                onChatSettings: {
-                    showChatSettings = true
-                }
-            )
-            .zIndex(1)
+            if let vm = conversationListVM {
+                SideMenuView(
+                    conversationListVM: vm,
+                    isOpen: $showSideMenu,
+                    onSelect: { conversation in
+                        switchToConversation(conversation)
+                    },
+                    onSettings: {
+                        appState.showSettings = true
+                    },
+                    onChatSettings: {
+                        showChatSettings = true
+                    }
+                )
+                .zIndex(1)
+            }
         }
         .gesture(
             DragGesture()
@@ -95,18 +121,14 @@ struct ContentView: View {
     }
 
     private func createNewConversation() {
-        // Clean up current conversation if it has no messages
-        if let current = currentConversation, current.messages.isEmpty, current.modelContext != nil {
-            modelContext.delete(current)
-            try? modelContext.save()
-        }
-        let conversation = Conversation()
+        guard let vm = conversationListVM else { return }
+        let conversation = vm.createConversation()
         switchToConversation(conversation)
-        Haptics.light()
     }
 
     private func switchToConversation(_ conversation: Conversation) {
+        guard let userId = authService.userId else { return }
         currentConversation = conversation
-        chatViewModel = ChatViewModel(conversation: conversation, modelContext: modelContext)
+        chatViewModel = ChatViewModel(conversation: conversation, userId: userId)
     }
 }

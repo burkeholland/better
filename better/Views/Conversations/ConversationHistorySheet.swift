@@ -1,10 +1,8 @@
 import SwiftUI
-import SwiftData
 
 struct ConversationHistorySheet: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
-    @Query(sort: \Conversation.updatedAt, order: .reverse) private var conversations: [Conversation]
+    var conversationListVM: ConversationListViewModel
     @State private var searchText = ""
 
     let onSelect: (Conversation) -> Void
@@ -88,7 +86,7 @@ struct ConversationHistorySheet: View {
                 }
             }
             .overlay {
-                if conversations.isEmpty {
+                if conversationListVM.conversations.isEmpty {
                     ContentUnavailableView {
                         VStack(spacing: 8) {
                             Image(systemName: "bubble.left.and.text.bubble.right")
@@ -108,14 +106,12 @@ struct ConversationHistorySheet: View {
 
     private var filtered: [Conversation] {
         if searchText.isEmpty {
-            return conversations
+            return conversationListVM.conversations
         }
-        return conversations.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+        return conversationListVM.conversations.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
     }
 
     private func deleteConversation(_ conversation: Conversation) {
-        modelContext.delete(conversation)
-        try? modelContext.save()
-        Haptics.light()
+        conversationListVM.deleteConversation(conversation)
     }
 }

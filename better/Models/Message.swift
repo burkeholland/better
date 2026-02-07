@@ -1,23 +1,16 @@
 import Foundation
-import SwiftData
 
-@Model
-final class Message {
-    #Unique<Message>([\.id])
-
-    var id: UUID
+struct Message: Codable, Identifiable, Equatable, Hashable {
+    var id: String
     var role: String  // "user" or "model"
     var content: String
     var createdAt: Date
     var selectedAt: Date?
-    var parentId: UUID?  // For branching - references another Message's id
+    var parentId: String?  // For branching - references another Message's id
 
-    var conversation: Conversation?
-
-    // Image data (inline)
-    @Attribute(.externalStorage)
-    var imageData: Data?
-    var imageMimeType: String?
+    // Media (Firebase Storage URL)
+    var mediaURL: String?
+    var mediaMimeType: String?
 
     // Token counts
     var inputTokens: Int?
@@ -27,16 +20,13 @@ final class Message {
     // Thinking content (for thinking models)
     var thinkingContent: String?
 
-    // Is this message currently being streamed?
-    @Transient
-    var isStreaming: Bool = false
-
     init(
+        id: String = UUID().uuidString,
         role: String,
         content: String,
-        parentId: UUID? = nil
+        parentId: String? = nil
     ) {
-        self.id = UUID()
+        self.id = id
         self.role = role
         self.content = content
         self.createdAt = Date()
@@ -47,5 +37,8 @@ final class Message {
     var isUser: Bool { role == "user" }
 
     /// Whether this message has an image attachment
-    var hasImage: Bool { imageData != nil }
+    var hasImage: Bool { mediaURL != nil }
+
+    /// Whether this message has any media attachment
+    var hasMedia: Bool { mediaURL != nil }
 }

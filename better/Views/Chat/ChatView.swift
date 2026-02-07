@@ -1,5 +1,4 @@
 import SwiftUI
-import SwiftData
 
 struct ChatView: View {
     @Bindable var viewModel: ChatViewModel
@@ -45,6 +44,7 @@ struct ChatView: View {
                                 ForEach(viewModel.displayMessages) { message in
                                     MessageBubble(
                                         message: message,
+                                        isStreaming: viewModel.streamingMessage?.id == message.id,
                                         branchInfo: viewModel.branchInfo(for: message),
                                         onRegenerate: {
                                             Task { await viewModel.regenerate(from: message) }
@@ -157,9 +157,11 @@ struct ChatView: View {
         .adaptiveBackground()
         .navigationTitle(viewModel.conversation.title)
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $showChatSettings) {
+        .sheet(isPresented: $showChatSettings, onDismiss: {
+            Task { await viewModel.persistConversation() }
+        }) {
             NavigationStack {
-                ParameterControlsView(conversation: viewModel.conversation)
+                ParameterControlsView(conversation: $viewModel.conversation)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("Done") {

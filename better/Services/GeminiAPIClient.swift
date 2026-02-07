@@ -26,6 +26,7 @@ struct ToolsConfig: Sendable {
     let codeExecution: Bool
     let urlContext: Bool
     let imageGeneration: Bool
+    let videoGeneration: Bool
 }
 
 struct ModelInfo: Codable, Sendable {
@@ -78,6 +79,7 @@ enum GeminiAPIError: Error, LocalizedError {
     case invalidURL
     case httpError(statusCode: Int, message: String?)
     case decodingError
+    case invalidResponse(message: String)
     case requestFailed(Error)
 
     var errorDescription: String? {
@@ -93,6 +95,8 @@ enum GeminiAPIError: Error, LocalizedError {
             return "HTTP \(statusCode)"
         case .decodingError:
             return "Unable to decode response"
+        case .invalidResponse(let message):
+            return message
         case .requestFailed(let error):
             return error.localizedDescription
         }
@@ -194,6 +198,79 @@ final class GeminiAPIClient {
         }
     }
 
+    func generateVideo(prompt: String, aspectRatio: String? = nil) async throws -> Data {
+        let apiKey = try requireAPIKey()
+        let requestBody = GenerateVideoRequest(
+            instances: [GenerateVideoInstance(prompt: prompt)],
+            parameters: aspectRatio.map { GenerateVideoParameters(aspectRatio: $0) }
+        )
+        let endpoint = "models/veo-3.1-generate-preview:predictLongRunning"
+
+        var request = try makeRequest(endpoint: endpoint, method: "POST")
+        request.httpBody = try JSONEncoder().encode(requestBody)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validateResponse(response, data: data)
+            let operation = try JSONDecoder().decode(GenerateVideoOperation.self, from: data)
+            print("Video generation started: \(operation.name)")
+
+            var status = try await fetchVideoOperationStatus(name: operation.name, apiKey: apiKey)
+            if let error = status.error {
+                throw GeminiAPIError.invalidResponse(
+                    message: operationErrorDescription(error, operationName: status.name ?? operation.name)
+                )
+            }
+            while status.done != true {
+                try await Task.sleep(nanoseconds: 10 * 1_000_000_000)
+                status = try await fetchVideoOperationStatus(name: operation.name, apiKey: apiKey)
+                print("Polling video status... done: \(status.done ?? false)")
+                if let error = status.error {
+                    throw GeminiAPIError.invalidResponse(
+                        message: operationErrorDescription(error, operationName: status.name ?? operation.name)
+                    )
+                }
+            }
+
+            print("Video generation complete, checking for URI...")
+
+            if status.response == nil {
+                print("Response is nil")
+            } else if status.response?.generateVideoResponse == nil {
+                print("generateVideoResponse is nil")
+            } else if status.response?.generateVideoResponse?.generatedSamples == nil ||
+                      status.response?.generateVideoResponse?.generatedSamples?.isEmpty == true {
+                print("generatedSamples is nil or empty")
+            } else if status.response?.generateVideoResponse?.generatedSamples?.first?.video == nil {
+                print("video is nil")
+            } else if status.response?.generateVideoResponse?.generatedSamples?.first?.video?.uri == nil {
+                print("uri is nil")
+            }
+
+            guard let uri = status.response?.generateVideoResponse?.generatedSamples?.first?.video?.uri else {
+                let operationName = status.name ?? operation.name
+                throw GeminiAPIError.invalidResponse(
+                    message: "Video generation completed without a video URI. Operation: \(operationName)"
+                )
+            }
+
+            print("Video URI found: \(uri)")
+            print("Downloading video from URI...")
+            let videoData = try await downloadVideo(from: uri)
+            print("Video downloaded: \(videoData.count) bytes")
+            return videoData
+        } catch let error as GeminiAPIError {
+            throw error
+        } catch let error as DecodingError {
+            print("DecodingError: \(error)")
+            throw GeminiAPIError.decodingError
+        } catch {
+            throw GeminiAPIError.requestFailed(error)
+        }
+    }
+
     private func requireAPIKey() throws -> String {
         guard let key = KeychainService.loadAPIKey(), !key.isEmpty else {
             throw GeminiAPIError.missingAPIKey
@@ -227,11 +304,65 @@ final class GeminiAPIClient {
         }
     }
 
+    private func fetchVideoOperationStatus(name: String, apiKey: String) async throws -> GenerateVideoOperationStatus {
+        let endpoint = name
+        var request = try makeRequest(endpoint: endpoint, method: "GET")
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateResponse(response, data: data)
+        do {
+            return try JSONDecoder().decode(GenerateVideoOperationStatus.self, from: data)
+        } catch {
+            print("Failed to decode video operation status. Raw JSON:")
+            print(String(data: data, encoding: .utf8) ?? "<non-utf8 data>")
+            throw error
+        }
+    }
+
+    private func downloadVideo(from uri: String) async throws -> Data {
+        guard let url = URL(string: uri) else {
+            throw GeminiAPIError.invalidURL
+        }
+
+        let apiKey = try requireAPIKey()
+        var request = URLRequest(url: url)
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw GeminiAPIError.httpError(statusCode: http.statusCode, message: nil)
+        }
+        return data
+    }
+
     private func parseAPIErrorMessage(from data: Data) -> String? {
         guard let errorResponse = try? JSONDecoder().decode(APIErrorResponse.self, from: data) else {
             return nil
         }
         return errorResponse.error.message
+    }
+
+    private func operationErrorDescription(
+        _ error: GenerateVideoOperationError,
+        operationName: String?
+    ) -> String {
+        var message = "Video generation failed"
+        if let operationName, !operationName.isEmpty {
+            message += " for operation \(operationName)"
+        }
+
+        var details: [String] = []
+        if let code = error.code {
+            details.append("code \(code)")
+        }
+        if let errorMessage = error.message, !errorMessage.isEmpty {
+            details.append(errorMessage)
+        }
+
+        if details.isEmpty {
+            return message + "."
+        }
+        return message + ": " + details.joined(separator: " - ")
     }
 
     private func buildRequestBody(
@@ -310,6 +441,27 @@ final class GeminiAPIClient {
                         "prompt": FunctionProperty(
                             type: "string",
                             description: "A detailed, optimized prompt for image generation. Enhance the user's request with specific details about style, composition, lighting, colors, and mood to produce the best possible image."
+                        )
+                    ],
+                    required: ["prompt"]
+                )
+            )
+            toolList.append(Tool(googleSearch: nil, codeExecution: nil, urlContext: nil, functionDeclarations: [decl]))
+        }
+        if tools.videoGeneration {
+            let decl = FunctionDeclaration(
+                name: "generate_video",
+                description: "Generate a video from a text description. Use this when the user asks you to create, generate, or make a video, clip, or animation.",
+                parameters: FunctionParameters(
+                    type: "object",
+                    properties: [
+                        "prompt": FunctionProperty(
+                            type: "string",
+                            description: "A detailed, optimized prompt for video generation. Enhance the user's request with specific details about camera movement, scene composition, action, lighting, and mood."
+                        ),
+                        "aspectRatio": FunctionProperty(
+                            type: "string",
+                            description: "Video aspect ratio: '16:9' for landscape, '9:16' for portrait, or '1:1' for square. Default is '16:9'."
                         )
                     ],
                     required: ["prompt"]
@@ -406,4 +558,53 @@ private struct APIErrorBody: Codable {
 
 private struct ListModelsResponse: Codable {
     let models: [ModelInfo]
+}
+
+private struct GenerateVideoRequest: Encodable {
+    let instances: [GenerateVideoInstance]
+    let parameters: GenerateVideoParameters?
+}
+
+private struct GenerateVideoInstance: Encodable {
+    let prompt: String
+}
+
+private struct GenerateVideoParameters: Encodable {
+    let aspectRatio: String?
+}
+
+private struct GenerateVideoOperation: Decodable {
+    let name: String
+}
+
+private struct GenerateVideoOperationStatus: Decodable {
+    let name: String?
+    let done: Bool?
+    let response: GenerateVideoOperationResponse?
+    let error: GenerateVideoOperationError?
+}
+
+private struct GenerateVideoOperationError: Decodable {
+    let code: Int?
+    let message: String?
+}
+
+private struct GenerateVideoOperationResponse: Decodable {
+    let generateVideoResponse: GenerateVideoResponseBody?
+
+    private enum CodingKeys: String, CodingKey {
+        case generateVideoResponse
+    }
+}
+
+private struct GenerateVideoResponseBody: Decodable {
+    let generatedSamples: [GenerateVideoSample]?
+}
+
+private struct GenerateVideoSample: Decodable {
+    let video: GenerateVideoVideo?
+}
+
+private struct GenerateVideoVideo: Decodable {
+    let uri: String?
 }

@@ -1,9 +1,7 @@
 import SwiftUI
-import SwiftData
 
 struct SideMenuView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query(sort: \Conversation.updatedAt, order: .reverse) private var conversations: [Conversation]
+    var conversationListVM: ConversationListViewModel
     @Binding var isOpen: Bool
     @State private var dragOffset: CGFloat = 0
 
@@ -16,8 +14,6 @@ struct SideMenuView: View {
     var body: some View {
         GeometryReader { proxy in
             let menuWidth = min(proxy.size.width * 0.8, maxMenuWidth)
-            let pinned = conversations.filter { $0.isPinned }
-            let recent = conversations.filter { !$0.isPinned && !$0.isArchived }
 
             ZStack(alignment: .leading) {
                 // Scrim
@@ -50,19 +46,19 @@ struct SideMenuView: View {
 
                         // Conversation list
                         List {
-                            if conversations.isEmpty {
+                            if conversationListVM.conversations.isEmpty {
                                 emptyState
                                     .listRowSeparator(.hidden)
                                     .listRowInsets(EdgeInsets())
                                     .listRowBackground(Color.clear)
                             } else {
-                                if !pinned.isEmpty {
+                                if !conversationListVM.pinnedConversations.isEmpty {
                                     sectionLabel("PINNED")
                                         .listRowSeparator(.hidden)
                                         .listRowInsets(EdgeInsets())
                                         .listRowBackground(Color.clear)
 
-                                    ForEach(pinned) { conversation in
+                                    ForEach(conversationListVM.pinnedConversations) { conversation in
                                         conversationRow(conversation)
                                             .listRowSeparator(.hidden)
                                             .listRowInsets(EdgeInsets())
@@ -70,13 +66,13 @@ struct SideMenuView: View {
                                     }
                                 }
 
-                                if !recent.isEmpty {
+                                if !conversationListVM.recentConversations.isEmpty {
                                     sectionLabel("RECENT")
                                         .listRowSeparator(.hidden)
                                         .listRowInsets(EdgeInsets())
                                         .listRowBackground(Color.clear)
 
-                                    ForEach(recent) { conversation in
+                                    ForEach(conversationListVM.recentConversations) { conversation in
                                         conversationRow(conversation)
                                             .listRowSeparator(.hidden)
                                             .listRowInsets(EdgeInsets())
@@ -181,14 +177,11 @@ struct SideMenuView: View {
     }
 
     private func deleteConversation(_ conversation: Conversation) {
-        modelContext.delete(conversation)
-        try? modelContext.save()
-        Haptics.light()
+        conversationListVM.deleteConversation(conversation)
     }
 
     private func togglePinned(_ conversation: Conversation) {
-        conversation.isPinned.toggle()
-        try? modelContext.save()
+        conversationListVM.togglePin(conversation)
         Haptics.light()
     }
 

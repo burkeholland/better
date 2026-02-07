@@ -1,14 +1,12 @@
 import SwiftUI
-import SwiftData
 
 struct ConversationListView: View {
     @Bindable var viewModel: ConversationListViewModel
     @Environment(AppState.self) private var appState
-    @Query(sort: \Conversation.updatedAt, order: .reverse) private var conversations: [Conversation]
 
     var body: some View {
         List(selection: $viewModel.selectedConversation) {
-            let pinned = filteredConversations.filter { $0.isPinned }
+            let pinned = viewModel.pinnedConversations
             if !pinned.isEmpty {
                 Section("Pinned") {
                     ForEach(pinned) { conversation in
@@ -32,7 +30,7 @@ struct ConversationListView: View {
                 }
             }
 
-            let unpinned = filteredConversations.filter { !$0.isPinned && !$0.isArchived }
+            let unpinned = viewModel.recentConversations
             Section("Recent") {
                 ForEach(unpinned) { conversation in
                     ConversationRow(conversation: conversation)
@@ -81,7 +79,7 @@ struct ConversationListView: View {
             }
         }
         .overlay {
-            if conversations.isEmpty {
+            if viewModel.conversations.isEmpty {
                 ContentUnavailableView(
                     "No Conversations",
                     systemImage: "bubble.left",
@@ -89,12 +87,5 @@ struct ConversationListView: View {
                 )
             }
         }
-    }
-
-    private var filteredConversations: [Conversation] {
-        if viewModel.searchText.isEmpty {
-            return conversations
-        }
-        return conversations.filter { $0.title.localizedCaseInsensitiveContains(viewModel.searchText) }
     }
 }

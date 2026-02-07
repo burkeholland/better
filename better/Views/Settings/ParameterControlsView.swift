@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ParameterControlsView: View {
-    @Bindable var conversation: Conversation
+    @Binding var conversation: Conversation
 
     var body: some View {
         Form {

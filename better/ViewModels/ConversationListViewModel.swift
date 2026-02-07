@@ -1,21 +1,35 @@
 import SwiftUI
-import SwiftData
+import FirebaseFirestore
 
+@MainActor
 @Observable
 final class ConversationListViewModel {
+    var conversations: [Conversation] = []
     var searchText: String = ""
     var selectedConversation: Conversation?
 
-    private var modelContext: ModelContext
+    private let firestoreService = FirestoreService()
+    private var listener: ListenerRegistration?
+    private let userId: String
 
-    init(modelContext: ModelContext) {
-        self.modelContext = modelContext
+    init(userId: String) {
+        self.userId = userId
+        listener = firestoreService.listenToConversations(userId: userId) { [weak self] conversations in
+            Task { @MainActor [weak self] in
+                self?.conversations = conversations
+            }
+        }
+    }
+
+    deinit {
+        listener?.remove()
     }
 
     func createConversation() -> Conversation {
         let conversation = Conversation()
-        modelContext.insert(conversation)
-        try? modelContext.save()
+        Task {
+            try? await firestoreService.createConversation(conversation, userId: userId)
+        }
         selectedConversation = conversation
         Haptics.light()
         return conversation
@@ -25,21 +39,46 @@ final class ConversationListViewModel {
         if selectedConversation?.id == conversation.id {
             selectedConversation = nil
         }
-        modelContext.delete(conversation)
-        try? modelContext.save()
+        Task {
+            try? await firestoreService.deleteConversation(conversation.id, userId: userId)
+        }
         Haptics.medium()
     }
 
     func togglePin(_ conversation: Conversation) {
-        conversation.isPinned.toggle()
-        try? modelContext.save()
+        var updated = conversation
+        updated.isPinned.toggle()
+        if let index = conversations.firstIndex(where: { $0.id == conversation.id }) {
+            conversations[index] = updated
+        }
+        Task {
+            try? await firestoreService.updateConversation(updated, userId: userId)
+        }
     }
 
     func archiveConversation(_ conversation: Conversation) {
-        conversation.isArchived = true
+        var updated = conversation
+        updated.isArchived = true
         if selectedConversation?.id == conversation.id {
             selectedConversation = nil
         }
-        try? modelContext.save()
+        Task {
+            try? await firestoreService.updateConversation(updated, userId: userId)
+        }
+    }
+
+    var filteredConversations: [Conversation] {
+        if searchText.isEmpty {
+            return conversations
+        }
+        return conversations.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+    }
+
+    var pinnedConversations: [Conversation] {
+        filteredConversations.filter { $0.isPinned }
+    }
+
+    var recentConversations: [Conversation] {
+        filteredConversations.filter { !$0.isPinned && !$0.isArchived }
     }
 }

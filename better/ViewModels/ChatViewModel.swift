@@ -1,6 +1,7 @@
 import SwiftUI
-import SwiftData
+import FirebaseFirestore
 
+@MainActor
 @Observable
 final class ChatViewModel {
     var conversation: Conversation
@@ -8,27 +9,81 @@ final class ChatViewModel {
     var isGenerating: Bool = false
     var errorMessage: String?
     var streamingMessage: Message?
+    var messages: [Message] = []
 
     private let apiClient = GeminiAPIClient()
+    private let firestoreService = FirestoreService()
+    private let userId: String
     private var streamTask: Task<Void, Never>?
-    private var modelContext: ModelContext
+    private var messagesListener: ListenerRegistration?
 
-    init(conversation: Conversation, modelContext: ModelContext) {
+    init(conversation: Conversation, userId: String) {
         self.conversation = conversation
-        self.modelContext = modelContext
+        self.userId = userId
+
+        messagesListener = firestoreService.listenToMessages(
+            conversationId: conversation.id,
+            userId: userId
+        ) { [weak self] messages in
+            Task { @MainActor [weak self] in
+                self?.messages = messages
+            }
+        }
     }
 
-    // Computed: active branch of messages to display
+    deinit {
+        messagesListener?.remove()
+    }
+
+    // MARK: - Tree Logic
+
+    var activeBranch: [Message] {
+        let sorted = messages.sorted { $0.createdAt < $1.createdAt }
+        guard !sorted.isEmpty else { return [] }
+        let roots = sorted.filter { $0.parentId == nil }
+        guard let root = roots.last else { return [] }
+        var branch: [Message] = [root]
+        var current = root
+        while true {
+            let children = sorted.filter { $0.parentId == current.id }
+            guard let latest = children.max(by: { a, b in
+                (a.selectedAt ?? a.createdAt) < (b.selectedAt ?? b.createdAt)
+            }) else { break }
+            branch.append(latest)
+            current = latest
+        }
+        return branch
+    }
+
+    func siblings(of message: Message) -> [Message] {
+        let sorted = messages.sorted { $0.createdAt < $1.createdAt }
+        return sorted.filter { $0.parentId == message.parentId && $0.role == message.role }
+    }
+
+    // MARK: - Display
+
     var displayMessages: [Message] {
-        conversation.activeBranch
+        var branch = activeBranch
+        if let streaming = streamingMessage {
+            branch.append(streaming)
+        }
+        return branch
     }
 
     var isProMode: Bool {
         get { conversation.modelName == Constants.Models.pro }
-        set { conversation.modelName = newValue ? Constants.Models.pro : Constants.Models.flash }
+        set {
+            conversation.modelName = newValue ? Constants.Models.pro : Constants.Models.flash
+            Task { try? await firestoreService.updateConversation(conversation, userId: userId) }
+        }
     }
 
-    // Send a message
+    func persistConversation() async {
+        try? await firestoreService.updateConversation(conversation, userId: userId)
+    }
+
+    // MARK: - Send
+
     func send(text: String) async {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
@@ -36,317 +91,112 @@ final class ChatViewModel {
         isGenerating = true
         errorMessage = nil
 
-        // Determine parent: last message in active branch
-        let parentId = displayMessages.last?.id
-
-        // Create user message
+        let parentId = activeBranch.last?.id
         let userMessage = Message(role: "user", content: text, parentId: parentId)
-        userMessage.conversation = conversation
-        // Persist conversation on first message
-        if conversation.modelContext == nil {
-            modelContext.insert(conversation)
-        }
-        modelContext.insert(userMessage)
-        conversation.updatedAt = Date()
 
-        // Auto-title on first message
+        let isNew = messages.isEmpty
+
         if conversation.title == "New Chat" {
             conversation.title = String(text.prefix(40))
         }
+        conversation.updatedAt = Date()
 
-        try? modelContext.save()
-
-        // Build message payloads from active branch
-        let branch = conversation.activeBranch
-        let payloads = branch.map { msg in
-            MessagePayload(
-                role: msg.role,
-                text: msg.content,
-                imageData: msg.imageData,
-                imageMimeType: msg.imageMimeType
-            )
+        do {
+            if isNew {
+                try await firestoreService.createConversation(conversation, userId: userId)
+            } else {
+                try await firestoreService.updateConversation(conversation, userId: userId)
+            }
+            try await firestoreService.addMessage(userMessage, conversationId: conversation.id, userId: userId)
+        } catch {
+            errorMessage = error.localizedDescription
+            isGenerating = false
+            return
         }
 
-        let config = GenerationConfig(
-            temperature: conversation.temperature,
-            topP: conversation.topP,
-            topK: conversation.topK,
-            maxOutputTokens: conversation.maxOutputTokens,
-            thinkingBudget: conversation.thinkingBudget
-        )
-
-        let tools = ToolsConfig(
-            googleSearch: conversation.googleSearchEnabled,
-            codeExecution: conversation.codeExecutionEnabled,
-            urlContext: conversation.urlContextEnabled,
-            imageGeneration: true
-        )
-
-        // Create placeholder response message
-        let responseMessage = Message(role: "model", content: "", parentId: userMessage.id)
-        responseMessage.conversation = conversation
-        responseMessage.isStreaming = true
-        modelContext.insert(responseMessage)
-        self.streamingMessage = responseMessage
-
-        // Stream response
-        let stream = apiClient.streamContent(
-            messages: payloads,
-            config: config,
-            tools: tools,
-            systemInstruction: conversation.systemInstruction,
-            model: conversation.modelName
-        )
-
-        streamTask = Task {
-            for await event in stream {
-                switch event {
-                case .text(let text):
-                    responseMessage.content += text
-                case .thinking(let thought):
-                    responseMessage.thinkingContent = (responseMessage.thinkingContent ?? "") + thought
-                case .imageData(let data, let mimeType):
-                    responseMessage.imageData = data
-                    responseMessage.imageMimeType = mimeType
-                case .functionCall(let name, let args):
-                    if name == "generate_image", let prompt = args["prompt"] {
-                        let imageModel: String
-                        if conversation.modelName == Constants.Models.pro {
-                            imageModel = Constants.Models.proImage
-                        } else {
-                            imageModel = Constants.Models.flashImage
-                        }
-
-                        let imagePayloads = [MessagePayload(role: "user", text: prompt, imageData: nil, imageMimeType: nil)]
-                        let imageConfig = GenerationConfig(
-                            temperature: conversation.temperature,
-                            topP: conversation.topP,
-                            topK: conversation.topK,
-                            maxOutputTokens: conversation.maxOutputTokens,
-                            thinkingBudget: nil,
-                            responseModalities: ["IMAGE"],
-                            imageConfig: nil
-                        )
-
-                        do {
-                            let imageResponse = try await apiClient.generateContent(
-                                messages: imagePayloads,
-                                config: imageConfig,
-                                tools: nil,
-                                systemInstruction: nil,
-                                model: imageModel
-                            )
-
-                            if let parts = imageResponse.candidates.first?.content?.parts {
-                                for part in parts {
-                                    if let inlineData = part.inlineData,
-                                       let data = Data(base64Encoded: inlineData.data) {
-                                        responseMessage.imageData = data
-                                        responseMessage.imageMimeType = inlineData.mimeType
-                                    }
-                                    if let text = part.text {
-                                        responseMessage.content += text
-                                    }
-                                }
-                            }
-                        } catch {
-                            responseMessage.content += "\n[Image generation failed: \(error.localizedDescription)]"
-                        }
-                    }
-                case .usageMetadata(let input, let output, let cached):
-                    responseMessage.inputTokens = input
-                    responseMessage.outputTokens = output
-                    responseMessage.cachedTokens = cached
-                case .error(let error):
-                    errorMessage = error
-                case .done:
-                    break
-                }
-            }
-
-            responseMessage.isStreaming = false
-            self.streamingMessage = nil
-            self.isGenerating = false
-            conversation.updatedAt = Date()
-            try? modelContext.save()
-            Haptics.success()
-
-            // Generate smart title on first exchange
-            if conversation.messages.count <= 2 {
-                let userInput = text
-                let modelResponse = responseMessage.content
-                Task.detached { [weak self] in
-                    await self?.generateSmartTitle(userText: userInput, responseText: modelResponse)
-                }
-            }
+        // Build payloads — include user message in case listener hasn't fired yet
+        var currentBranch = activeBranch
+        if !currentBranch.contains(where: { $0.id == userMessage.id }) {
+            currentBranch.append(userMessage)
         }
+
+        let payloads = currentBranch.map { msg in
+            MessagePayload(role: msg.role, text: msg.content, imageData: nil, imageMimeType: nil)
+        }
+
+        startStreamingResponse(payloads: payloads, parentId: userMessage.id, smartTitleUserText: text)
     }
 
-    // Stop generation
+    // MARK: - Stop
+
     func stopGenerating() {
         streamTask?.cancel()
         streamTask = nil
-        streamingMessage?.isStreaming = false
+
+        // Persist partial response if it has content
+        if let finalMessage = streamingMessage, !finalMessage.content.isEmpty {
+            Task {
+                try? await firestoreService.addMessage(finalMessage, conversationId: conversation.id, userId: userId)
+            }
+        }
+
         streamingMessage = nil
         isGenerating = false
-        try? modelContext.save()
     }
 
-    // Regenerate from a specific assistant message (creates new branch)
+    // MARK: - Regenerate
+
     func regenerate(from message: Message) async {
         guard message.role == "model" else { return }
 
-        // The new response will share the same parentId as the message being regenerated
         let parentId = message.parentId
-
         isGenerating = true
         errorMessage = nil
 
-        // Build messages up to (not including) the message being regenerated
-        let branch = conversation.activeBranch
+        let branch = activeBranch
         guard let index = branch.firstIndex(where: { $0.id == message.id }) else { return }
         let messagesUpToParent = Array(branch.prefix(index))
 
         let payloads = messagesUpToParent.map { msg in
-            MessagePayload(
-                role: msg.role,
-                text: msg.content,
-                imageData: msg.imageData,
-                imageMimeType: msg.imageMimeType
-            )
+            MessagePayload(role: msg.role, text: msg.content, imageData: nil, imageMimeType: nil)
         }
 
-        let config = GenerationConfig(
-            temperature: conversation.temperature,
-            topP: conversation.topP,
-            topK: conversation.topK,
-            maxOutputTokens: conversation.maxOutputTokens,
-            thinkingBudget: conversation.thinkingBudget
-        )
-
-        let tools = ToolsConfig(
-            googleSearch: conversation.googleSearchEnabled,
-            codeExecution: conversation.codeExecutionEnabled,
-            urlContext: conversation.urlContextEnabled,
-            imageGeneration: true
-        )
-
-        // Create new branch response
-        let responseMessage = Message(role: "model", content: "", parentId: parentId)
-        responseMessage.conversation = conversation
-        responseMessage.isStreaming = true
-        modelContext.insert(responseMessage)
-        self.streamingMessage = responseMessage
-
-        let stream = apiClient.streamContent(
-            messages: payloads,
-            config: config,
-            tools: tools,
-            systemInstruction: conversation.systemInstruction,
-            model: conversation.modelName
-        )
-
-        streamTask = Task {
-            for await event in stream {
-                switch event {
-                case .text(let text):
-                    responseMessage.content += text
-                case .thinking(let thought):
-                    responseMessage.thinkingContent = (responseMessage.thinkingContent ?? "") + thought
-                case .imageData(let data, let mimeType):
-                    responseMessage.imageData = data
-                    responseMessage.imageMimeType = mimeType
-                case .functionCall(let name, let args):
-                    if name == "generate_image", let prompt = args["prompt"] {
-                        let imageModel: String
-                        if conversation.modelName == Constants.Models.pro {
-                            imageModel = Constants.Models.proImage
-                        } else {
-                            imageModel = Constants.Models.flashImage
-                        }
-
-                        let imagePayloads = [MessagePayload(role: "user", text: prompt, imageData: nil, imageMimeType: nil)]
-                        let imageConfig = GenerationConfig(
-                            temperature: conversation.temperature,
-                            topP: conversation.topP,
-                            topK: conversation.topK,
-                            maxOutputTokens: conversation.maxOutputTokens,
-                            thinkingBudget: nil,
-                            responseModalities: ["IMAGE"],
-                            imageConfig: nil
-                        )
-
-                        do {
-                            let imageResponse = try await apiClient.generateContent(
-                                messages: imagePayloads,
-                                config: imageConfig,
-                                tools: nil,
-                                systemInstruction: nil,
-                                model: imageModel
-                            )
-
-                            if let parts = imageResponse.candidates.first?.content?.parts {
-                                for part in parts {
-                                    if let inlineData = part.inlineData,
-                                       let data = Data(base64Encoded: inlineData.data) {
-                                        responseMessage.imageData = data
-                                        responseMessage.imageMimeType = inlineData.mimeType
-                                    }
-                                    if let text = part.text {
-                                        responseMessage.content += text
-                                    }
-                                }
-                            }
-                        } catch {
-                            responseMessage.content += "\n[Image generation failed: \(error.localizedDescription)]"
-                        }
-                    }
-                case .usageMetadata(let input, let output, let cached):
-                    responseMessage.inputTokens = input
-                    responseMessage.outputTokens = output
-                    responseMessage.cachedTokens = cached
-                case .error(let error):
-                    errorMessage = error
-                case .done:
-                    break
-                }
-            }
-
-            responseMessage.isStreaming = false
-            self.streamingMessage = nil
-            self.isGenerating = false
-            conversation.updatedAt = Date()
-            try? modelContext.save()
-        }
+        startStreamingResponse(payloads: payloads, parentId: parentId)
     }
 
-    // Edit a user message and re-send (modifies in place and regenerates)
+    // MARK: - Edit & Resend
+
     func editAndResend(_ message: Message, newText: String) async {
         guard message.role == "user" else { return }
 
-        message.content = newText
+        var updatedMessage = message
+        updatedMessage.content = newText
 
-        var toDelete: Set<UUID> = []
-        var frontier: Set<UUID> = [message.id]
+        // Find all descendants to delete (not the edited message itself)
+        var idsToDelete: [String] = []
+        var frontier: Set<String> = [message.id]
 
         while !frontier.isEmpty {
-            let children = conversation.messages.filter { msg in
-                if let pid = msg.parentId { return frontier.contains(pid) }
-                return false
+            let children = messages.filter { msg in
+                guard let pid = msg.parentId else { return false }
+                return frontier.contains(pid)
             }
-            let childIds = Set(children.map { $0.id })
-            frontier = childIds
-            toDelete.formUnion(childIds)
+            let childIds = Set(children.map(\.id))
+            frontier = childIds.subtracting(Set(idsToDelete))
+            idsToDelete.append(contentsOf: childIds)
         }
 
-        for msg in conversation.messages where toDelete.contains(msg.id) {
-            modelContext.delete(msg)
+        do {
+            try await firestoreService.updateMessage(updatedMessage, conversationId: conversation.id, userId: userId)
+            if !idsToDelete.isEmpty {
+                try await firestoreService.deleteMessages(idsToDelete, conversationId: conversation.id, userId: userId)
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            return
         }
 
-        try? modelContext.save()
-
-        // Re-send from the edited message
-        await sendFromMessage(message)
+        await sendFromMessage(updatedMessage)
     }
 
     private func sendFromMessage(_ userMessage: Message) async {
@@ -359,46 +209,88 @@ final class ChatViewModel {
         while let msg = current {
             chain.insert(msg, at: 0)
             if let pid = msg.parentId {
-                current = conversation.messages.first { $0.id == pid }
+                current = messages.first { $0.id == pid }
             } else {
                 current = nil
             }
         }
 
         let payloads = chain.map { msg in
-            MessagePayload(
-                role: msg.role,
-                text: msg.content,
-                imageData: msg.imageData,
-                imageMimeType: msg.imageMimeType
-            )
+            MessagePayload(role: msg.role, text: msg.content, imageData: nil, imageMimeType: nil)
         }
 
-        let config = GenerationConfig(
-            temperature: conversation.temperature,
-            topP: conversation.topP,
-            topK: conversation.topK,
-            maxOutputTokens: conversation.maxOutputTokens,
-            thinkingBudget: conversation.thinkingBudget
-        )
+        startStreamingResponse(payloads: payloads, parentId: userMessage.id)
+    }
 
-        let tools = ToolsConfig(
-            googleSearch: conversation.googleSearchEnabled,
-            codeExecution: conversation.codeExecutionEnabled,
-            urlContext: conversation.urlContextEnabled,
-            imageGeneration: true
-        )
+    // MARK: - Delete
 
-        let responseMessage = Message(role: "model", content: "", parentId: userMessage.id)
-        responseMessage.conversation = conversation
-        responseMessage.isStreaming = true
-        modelContext.insert(responseMessage)
-        self.streamingMessage = responseMessage
+    func deleteFromMessage(_ message: Message) {
+        Task {
+            do {
+                try await firestoreService.deleteMessageSubtree(
+                    rootId: message.id,
+                    allMessages: messages,
+                    conversationId: conversation.id,
+                    userId: userId
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func deleteSingleMessage(_ message: Message) {
+        Task {
+            do {
+                var idsToDelete = [message.id]
+                if message.role == "user" {
+                    let directResponses = messages.filter { $0.parentId == message.id && $0.role == "model" }
+                    idsToDelete.append(contentsOf: directResponses.map(\.id))
+                }
+                try await firestoreService.deleteMessages(idsToDelete, conversationId: conversation.id, userId: userId)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    // MARK: - Branch Navigation
+
+    func switchBranch(for message: Message, direction: Int) {
+        let sibs = siblings(of: message)
+        guard sibs.count > 1 else { return }
+        guard let currentIndex = sibs.firstIndex(where: { $0.id == message.id }) else { return }
+
+        let newIndex = currentIndex + direction
+        guard newIndex >= 0 && newIndex < sibs.count else { return }
+
+        var target = sibs[newIndex]
+        target.selectedAt = Date()
+
+        Task {
+            try? await firestoreService.updateMessage(target, conversationId: conversation.id, userId: userId)
+        }
+
+        Haptics.selection()
+    }
+
+    func branchInfo(for message: Message) -> (current: Int, total: Int) {
+        let sibs = siblings(of: message)
+        guard let index = sibs.firstIndex(where: { $0.id == message.id }) else {
+            return (1, 1)
+        }
+        return (index + 1, sibs.count)
+    }
+
+    // MARK: - Streaming
+
+    private func startStreamingResponse(payloads: [MessagePayload], parentId: String?, smartTitleUserText: String? = nil) {
+        streamingMessage = Message(role: "model", content: "", parentId: parentId)
 
         let stream = apiClient.streamContent(
             messages: payloads,
-            config: config,
-            tools: tools,
+            config: buildConfig(),
+            tools: buildTools(),
             systemInstruction: conversation.systemInstruction,
             model: conversation.modelName
         )
@@ -407,140 +299,137 @@ final class ChatViewModel {
             for await event in stream {
                 switch event {
                 case .text(let text):
-                    responseMessage.content += text
+                    self.streamingMessage?.content += text
                 case .thinking(let thought):
-                    responseMessage.thinkingContent = (responseMessage.thinkingContent ?? "") + thought
+                    self.streamingMessage?.thinkingContent = (self.streamingMessage?.thinkingContent ?? "") + thought
                 case .imageData(let data, let mimeType):
-                    responseMessage.imageData = data
-                    responseMessage.imageMimeType = mimeType
+                    await self.uploadStreamingMedia(data: data, mimeType: mimeType)
                 case .functionCall(let name, let args):
-                    if name == "generate_image", let prompt = args["prompt"] {
-                        let imageModel: String
-                        if conversation.modelName == Constants.Models.pro {
-                            imageModel = Constants.Models.proImage
-                        } else {
-                            imageModel = Constants.Models.flashImage
-                        }
-
-                        let imagePayloads = [MessagePayload(role: "user", text: prompt, imageData: nil, imageMimeType: nil)]
-                        let imageConfig = GenerationConfig(
-                            temperature: conversation.temperature,
-                            topP: conversation.topP,
-                            topK: conversation.topK,
-                            maxOutputTokens: conversation.maxOutputTokens,
-                            thinkingBudget: nil,
-                            responseModalities: ["IMAGE"],
-                            imageConfig: nil
-                        )
-
-                        do {
-                            let imageResponse = try await apiClient.generateContent(
-                                messages: imagePayloads,
-                                config: imageConfig,
-                                tools: nil,
-                                systemInstruction: nil,
-                                model: imageModel
-                            )
-
-                            if let parts = imageResponse.candidates.first?.content?.parts {
-                                for part in parts {
-                                    if let inlineData = part.inlineData,
-                                       let data = Data(base64Encoded: inlineData.data) {
-                                        responseMessage.imageData = data
-                                        responseMessage.imageMimeType = inlineData.mimeType
-                                    }
-                                    if let text = part.text {
-                                        responseMessage.content += text
-                                    }
-                                }
-                            }
-                        } catch {
-                            responseMessage.content += "\n[Image generation failed: \(error.localizedDescription)]"
-                        }
-                    }
+                    await self.handleFunctionCall(name: name, args: args)
                 case .usageMetadata(let input, let output, let cached):
-                    responseMessage.inputTokens = input
-                    responseMessage.outputTokens = output
-                    responseMessage.cachedTokens = cached
+                    self.streamingMessage?.inputTokens = input
+                    self.streamingMessage?.outputTokens = output
+                    self.streamingMessage?.cachedTokens = cached
                 case .error(let error):
-                    errorMessage = error
+                    self.errorMessage = error
                 case .done:
                     break
                 }
             }
 
-            responseMessage.isStreaming = false
+            let responseContent = self.streamingMessage?.content ?? ""
+            await self.persistStreamingMessage()
             self.streamingMessage = nil
             self.isGenerating = false
-            conversation.updatedAt = Date()
-            try? modelContext.save()
-        }
-    }
+            self.conversation.updatedAt = Date()
+            try? await self.firestoreService.updateConversation(self.conversation, userId: self.userId)
+            Haptics.success()
 
-    // Delete a message and all its descendants
-    func deleteFromMessage(_ message: Message) {
-        var toDelete: Set<UUID> = [message.id]
-        var frontier: Set<UUID> = [message.id]
-
-        while !frontier.isEmpty {
-            let children = conversation.messages.filter { msg in
-                if let pid = msg.parentId { return frontier.contains(pid) }
-                return false
-            }
-            let childIds = Set(children.map { $0.id })
-            frontier = childIds
-            toDelete.formUnion(childIds)
-        }
-
-        for msg in conversation.messages where toDelete.contains(msg.id) {
-            modelContext.delete(msg)
-        }
-
-        try? modelContext.save()
-    }
-
-    /// Delete a single message (and its direct model response if it's a user message)
-    func deleteSingleMessage(_ message: Message) {
-        if message.role == "user" {
-            let directResponses = conversation.messages.filter {
-                $0.parentId == message.id && $0.role == "model"
-            }
-            for response in directResponses {
-                modelContext.delete(response)
+            // Generate smart title on first exchange
+            if let userText = smartTitleUserText, self.messages.count <= 2 {
+                Task.detached { [weak self] in
+                    await self?.generateSmartTitle(userText: userText, responseText: responseContent)
+                }
             }
         }
-
-        modelContext.delete(message)
-        try? modelContext.save()
     }
 
-    // Navigate to a sibling branch
-    func switchBranch(for message: Message, direction: Int) {
-        // This changes which message is "active" in the branch
-        // The active branch computation uses the LAST sibling by createdAt
-        // To switch branches, we adjust the createdAt of the target sibling to be the latest
-        let siblings = conversation.siblings(of: message)
-        guard siblings.count > 1 else { return }
-        guard let currentIndex = siblings.firstIndex(where: { $0.id == message.id }) else { return }
-
-        let newIndex = currentIndex + direction
-        guard newIndex >= 0 && newIndex < siblings.count else { return }
-
-        // Make the target sibling the "active" by setting its selectedAt to now
-        let target = siblings[newIndex]
-        target.selectedAt = Date()
-        try? modelContext.save()
-
-        Haptics.selection()
-    }
-
-    // Get branch info for a message
-    func branchInfo(for message: Message) -> (current: Int, total: Int) {
-        let siblings = conversation.siblings(of: message)
-        guard let index = siblings.firstIndex(where: { $0.id == message.id }) else {
-            return (1, 1)
+    private func uploadStreamingMedia(data: Data, mimeType: String) async {
+        guard let msgId = streamingMessage?.id else { return }
+        do {
+            let url = try await firestoreService.uploadMedia(
+                data: data, mimeType: mimeType,
+                userId: userId, conversationId: conversation.id, messageId: msgId
+            )
+            streamingMessage?.mediaURL = url
+            streamingMessage?.mediaMimeType = mimeType
+        } catch {
+            streamingMessage?.content += "\n[Media upload failed: \(error.localizedDescription)]"
         }
-        return (index + 1, siblings.count)
+    }
+
+    private func handleFunctionCall(name: String, args: [String: String]) async {
+        if name == "generate_image", let prompt = args["prompt"] {
+            let imageModel = conversation.modelName == Constants.Models.pro
+                ? Constants.Models.proImage
+                : Constants.Models.flashImage
+
+            let imagePayloads = [MessagePayload(role: "user", text: prompt, imageData: nil, imageMimeType: nil)]
+            let imageConfig = GenerationConfig(
+                temperature: conversation.temperature,
+                topP: conversation.topP,
+                topK: conversation.topK,
+                maxOutputTokens: conversation.maxOutputTokens,
+                thinkingBudget: nil,
+                responseModalities: ["IMAGE"],
+                imageConfig: nil
+            )
+
+            do {
+                let imageResponse = try await apiClient.generateContent(
+                    messages: imagePayloads,
+                    config: imageConfig,
+                    tools: nil,
+                    systemInstruction: nil,
+                    model: imageModel
+                )
+
+                if let parts = imageResponse.candidates.first?.content?.parts {
+                    for part in parts {
+                        if let inlineData = part.inlineData,
+                           let data = Data(base64Encoded: inlineData.data) {
+                            await uploadStreamingMedia(data: data, mimeType: inlineData.mimeType)
+                        }
+                        if let text = part.text {
+                            streamingMessage?.content += text
+                        }
+                    }
+                }
+            } catch {
+                streamingMessage?.content += "\n[Image generation failed: \(error.localizedDescription)]"
+            }
+        } else if name == "generate_video", let prompt = args["prompt"] {
+            let aspectRatio = args["aspectRatio"] ?? "16:9"
+
+            do {
+                let videoData = try await apiClient.generateVideo(
+                    prompt: prompt,
+                    aspectRatio: aspectRatio
+                )
+                await uploadStreamingMedia(data: videoData, mimeType: "video/mp4")
+            } catch {
+                streamingMessage?.content += "\n[Video generation failed: \(error.localizedDescription)]"
+            }
+        }
+    }
+
+    private func persistStreamingMessage() async {
+        guard let finalMessage = streamingMessage else { return }
+        do {
+            try await firestoreService.addMessage(finalMessage, conversationId: conversation.id, userId: userId)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func buildConfig() -> GenerationConfig {
+        GenerationConfig(
+            temperature: conversation.temperature,
+            topP: conversation.topP,
+            topK: conversation.topK,
+            maxOutputTokens: conversation.maxOutputTokens,
+            thinkingBudget: conversation.thinkingBudget
+        )
+    }
+
+    private func buildTools() -> ToolsConfig {
+        ToolsConfig(
+            googleSearch: conversation.googleSearchEnabled,
+            codeExecution: conversation.codeExecutionEnabled,
+            urlContext: conversation.urlContextEnabled,
+            imageGeneration: true,
+            videoGeneration: true
+        )
     }
 
     private func generateSmartTitle(userText: String, responseText: String) async {
@@ -548,7 +437,7 @@ final class ChatViewModel {
         guard conversation.title == truncated else { return }
 
         let preview = String(responseText.prefix(200))
-        let messages = [
+        let titleMessages = [
             MessagePayload(role: "user", text: userText, imageData: nil, imageMimeType: nil),
             MessagePayload(role: "model", text: preview, imageData: nil, imageMimeType: nil)
         ]
@@ -563,7 +452,7 @@ final class ChatViewModel {
 
         do {
             let response = try await apiClient.generateContent(
-                messages: messages,
+                messages: titleMessages,
                 config: config,
                 tools: nil,
                 systemInstruction: "Generate a concise 3-6 word title for this conversation. Return only the title text, nothing else.",
@@ -574,13 +463,10 @@ final class ChatViewModel {
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !title.isEmpty else { return }
 
-            await MainActor.run {
-                conversation.title = title
-                try? modelContext.save()
-            }
+            conversation.title = title
+            try? await firestoreService.updateConversation(conversation, userId: userId)
         } catch {
             // Silently fail — keep the truncated title
         }
     }
-
 }

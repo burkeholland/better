@@ -10,6 +10,7 @@ enum Constants {
         static let pro = "gemini-pro-latest"
         static let flashImage = "gemini-2.5-flash-image"
         static let proImage = "gemini-3-pro-image-preview"
+        static let video = "veo-3.1-generate-preview"
         static let defaultModel = flash
     }
 
@@ -18,5 +19,12 @@ enum Constants {
         static let topP: Double = 0.95
         static let topK: Int = 40
         static let maxOutputTokens: Int = 8192
+    }
+
+    enum Firestore {
+        static let usersCollection = "users"
+        static let conversationsCollection = "conversations"
+        static let messagesCollection = "messages"
+        static let mediaStoragePath = "media"
     }
 }

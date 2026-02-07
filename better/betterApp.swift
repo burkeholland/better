@@ -6,31 +6,23 @@
 //
 
 import SwiftUI
-import SwiftData
+import FirebaseCore
 
 @main
 struct betterApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Conversation.self,
-            Message.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
-    
     @State private var appState = AppState()
+    @State private var authService: AuthService
+
+    init() {
+        FirebaseApp.configure()
+        _authService = State(initialValue: AuthService())
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(appState)
+                .environment(authService)
         }
-        .modelContainer(sharedModelContainer)
     }
 }
