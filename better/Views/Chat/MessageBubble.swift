@@ -187,7 +187,7 @@ private extension MessageBubble {
                         .onTapGesture {
                             selectedImage = IdentifiableImage(image: uiImage)
                         }
-                } else if let url = URL(string: urlString) {
+                } else if let url = URL(string: urlString), urlString.hasPrefix("http") {
                     Group {
                         if let loadedImage {
                             Image(uiImage: loadedImage)
@@ -211,6 +211,40 @@ private extension MessageBubble {
                         guard loadedImage == nil else { return }
                         do {
                             let (data, _) = try await URLSession.shared.data(from: url)
+                            if let image = UIImage(data: data) {
+                                loadedImage = image
+                            } else {
+                                imageLoadFailed = true
+                            }
+                        } catch {
+                            imageLoadFailed = true
+                        }
+                    }
+                } else {
+                    // Firebase Storage path or other — use MediaService
+                    Group {
+                        if let loadedImage {
+                            Image(uiImage: loadedImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxHeight: 300)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .onTapGesture {
+                                    selectedImage = IdentifiableImage(image: loadedImage)
+                                }
+                        } else if imageLoadFailed {
+                            Label("Image failed to load", systemImage: "photo")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 200)
+                        }
+                    }
+                    .task {
+                        guard loadedImage == nil else { return }
+                        do {
+                            let data = try await MediaService.shared.downloadMedia(from: urlString)
                             if let image = UIImage(data: data) {
                                 loadedImage = image
                             } else {

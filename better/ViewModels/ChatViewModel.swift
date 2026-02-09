@@ -159,15 +159,17 @@ final class ChatViewModel {
         let attachment = pendingAttachment
         if let attachment {
             do {
-                let downloadURL = try await firestoreService.uploadMedia(
+                let storagePath = try await firestoreService.uploadMedia(
                     data: attachment.data,
                     mimeType: attachment.mimeType,
                     userId: userId,
                     conversationId: conversation.id,
                     messageId: userMessage.id
                 )
-                userMessage.mediaURL = downloadURL
+                userMessage.mediaURL = storagePath
                 userMessage.mediaMimeType = attachment.mimeType
+                // Cache locally so buildPayloads doesn't need to re-download
+                mediaService.cacheMedia(data: attachment.data, for: storagePath)
             } catch {
                 errorMessage = error.localizedDescription
                 isGenerating = false

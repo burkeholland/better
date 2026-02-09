@@ -123,15 +123,27 @@ final class FirestoreService {
     // MARK: - Media Methods
 
     func uploadMedia(data: Data, mimeType: String, userId: String, conversationId: String, messageId: String) async throws -> String {
-        let path = "\(Constants.Firestore.mediaStoragePath)/\(userId)/\(conversationId)/\(messageId)"
+        // Determine file extension from MIME type
+        let ext: String
+        switch mimeType {
+        case "image/png":             ext = "png"
+        case "image/jpeg":            ext = "jpg"
+        case "image/webp":            ext = "webp"
+        case "image/heic":            ext = "heic"
+        case "image/heif":            ext = "heif"
+        case "application/pdf":       ext = "pdf"
+        default:                      ext = "jpg"
+        }
+        
+        let path = "\(Constants.Firestore.mediaStoragePath)/\(userId)/\(conversationId)/\(messageId).\(ext)"
         let ref = storage.reference().child(path)
 
         let metadata = StorageMetadata()
         metadata.contentType = mimeType
 
-        _ = try await ref.putDataAsync(data, metadata: metadata)
-        let downloadURL = try await ref.downloadURL()
-        return downloadURL.absoluteString
+        _ = try await ref.putData(data, metadata: metadata)
+        // Return the storage path — we'll use the Storage SDK to fetch data later
+        return path
     }
 
     // MARK: - Tree Deletion
