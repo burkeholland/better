@@ -31,10 +31,6 @@ struct ChatView: View {
                                 Text("Start a conversation")
                                     .font(.title3.weight(.semibold))
                                     .foregroundStyle(Theme.charcoal)
-
-                                Text("Ask anything and let springtime ideas bloom.")
-                                    .font(.callout)
-                                    .foregroundStyle(Theme.charcoal.opacity(0.6))
                             }
                             .frame(maxWidth: .infinity)
                             .containerRelativeFrame(.vertical)
@@ -143,6 +139,24 @@ struct ChatView: View {
         .adaptiveBackground()
         .navigationTitle(viewModel.conversation.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if viewModel.hasTokenData {
+                ToolbarItem(placement: .principal) {
+                    VStack(spacing: 2) {
+                        Text(viewModel.conversation.title)
+                            .font(.headline)
+                            .lineLimit(1)
+                        TokenUsageBar(
+                            inputTokens: viewModel.totalInputTokens,
+                            outputTokens: viewModel.totalOutputTokens,
+                            cachedTokens: viewModel.totalCachedTokens,
+                            estimatedCost: viewModel.estimatedCost,
+                            isStreaming: viewModel.isGenerating
+                        )
+                    }
+                }
+            }
+        }
         .sheet(isPresented: $showChatSettings, onDismiss: {
             Task { await viewModel.persistConversation() }
         }) {

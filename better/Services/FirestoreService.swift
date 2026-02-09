@@ -1,6 +1,10 @@
 import Foundation
 import FirebaseFirestore
 import FirebaseStorage
+import FirebaseAuth
+import os
+
+private let logger = Logger(subsystem: "com.postrboard.better", category: "FirestoreService")
 
 final class FirestoreService {
     private let db = Firestore.firestore()
@@ -132,6 +136,7 @@ final class FirestoreService {
         case "image/heic":            ext = "heic"
         case "image/heif":            ext = "heif"
         case "application/pdf":       ext = "pdf"
+        case "video/mp4":             ext = "mp4"
         default:                      ext = "jpg"
         }
         
@@ -141,8 +146,48 @@ final class FirestoreService {
         let metadata = StorageMetadata()
         metadata.contentType = mimeType
 
-        _ = try await ref.putData(data, metadata: metadata)
-        // Return the storage path — we'll use the Storage SDK to fetch data later
+        logger.info("uploading \(data.count) bytes to \(path) (mimeType: \(mimeType))")
+
+        // Debug: check auth state and storage bucket
+        let authUser = Auth.auth().currentUser
+        logger.info("Auth state — uid: \(authUser?.uid ?? "nil"), bucket: \(self.storage.reference().bucket)")
+        if let authUser {
+            do {
+                let token = try await authUser.getIDTokenResult()
+                logger.info("Auth token valid, expires: \(token.expirationDate)")
+            } catch {
+                logger.error("Failed to get auth token: \(error.localizedDescription)")
+            }
+        }
+
+        // Write to a temp file and use putFile — more reliable for larger uploads
+        // and avoids StorageUploadTask deallocation issues with putData + continuations
+        let tempDir = FileManager.default.temporaryDirectory
+        let tempFile = tempDir.appendingPathComponent(UUID().uuidString + "." + ext)
+        try data.write(to: tempFile)
+        defer { try? FileManager.default.removeItem(at: tempFile) }
+
+        let _: StorageMetadata = try await withCheckedThrowingContinuation { continuation in
+            let task = ref.putFile(from: tempFile, metadata: metadata) { resultMetadata, error in
+                if let error {
+                    logger.error("putFile error: \(error.localizedDescription)")
+                    continuation.resume(throwing: error)
+                } else if let resultMetadata {
+                    logger.info("putFile success — size: \(resultMetadata.size)")
+                    continuation.resume(returning: resultMetadata)
+                } else {
+                    continuation.resume(throwing: GeminiAPIError.invalidResponse(message: "Upload returned no metadata and no error"))
+                }
+            }
+            // Prevent task from being deallocated before completion
+            task.observe(.failure) { snapshot in
+                logger.error("putFile task failure observed: \(snapshot.error?.localizedDescription ?? "unknown")")
+            }
+        }
+        logger.info("upload completed — path: \(path), bytes: \(data.count)")
+
+        // Return the storage path directly — MediaService already handles downloading
+        // via Storage SDK for non-URL paths, avoiding the downloadURL() race condition.
         return path
     }
 

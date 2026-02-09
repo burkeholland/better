@@ -17,6 +17,9 @@ struct Message: Codable, Identifiable, Equatable, Hashable {
     var outputTokens: Int?
     var cachedTokens: Int?
 
+    // Video generation cost (estimated from duration)
+    var videoCost: Double?
+
     // Thinking content (for thinking models)
     var thinkingContent: String?
 

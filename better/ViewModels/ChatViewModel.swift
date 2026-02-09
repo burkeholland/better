@@ -1,6 +1,10 @@
 import SwiftUI
 import PhotosUI
 import FirebaseFirestore
+import AVFoundation
+import os
+
+private let logger = Logger(subsystem: "com.postrboard.better", category: "ChatViewModel")
 
 @MainActor
 @Observable
@@ -79,6 +83,54 @@ final class ChatViewModel {
             conversation.modelName = newValue ? Constants.Models.pro : Constants.Models.flash
             Task { try? await firestoreService.updateConversation(conversation, userId: userId) }
         }
+    }
+
+    // MARK: - Token Usage
+
+    var totalInputTokens: Int {
+        let persisted = messages.filter { $0.role == "model" }.compactMap(\.inputTokens).reduce(0, +)
+        let streaming = streamingMessage?.inputTokens ?? 0
+        return persisted + streaming
+    }
+
+    var totalOutputTokens: Int {
+        let persisted = messages.filter { $0.role == "model" }.compactMap(\.outputTokens).reduce(0, +)
+        let streaming = streamingMessage?.outputTokens ?? 0
+        return persisted + streaming
+    }
+
+    var totalCachedTokens: Int {
+        let persisted = messages.filter { $0.role == "model" }.compactMap(\.cachedTokens).reduce(0, +)
+        let streaming = streamingMessage?.cachedTokens ?? 0
+        return persisted + streaming
+    }
+
+    var totalVideoCost: Double {
+        let persisted = messages.filter { $0.role == "model" }.compactMap(\.videoCost).reduce(0, +)
+        let streaming = streamingMessage?.videoCost ?? 0
+        return persisted + streaming
+    }
+
+    var hasTokenData: Bool {
+        totalInputTokens > 0 || totalOutputTokens > 0 || totalVideoCost > 0
+    }
+
+    /// Estimated cost in USD based on current Gemini pricing.
+    var estimatedCost: Double {
+        let isProModel = conversation.modelName.contains("pro")
+
+        // Gemini 2.5 pricing per token (as of 2025)
+        let inputRate: Double  = isProModel ? 1.25  / 1_000_000 : 0.15  / 1_000_000
+        let outputRate: Double = isProModel ? 10.0  / 1_000_000 : 0.60  / 1_000_000
+        let cachedRate: Double = isProModel ? 0.315 / 1_000_000 : 0.037 / 1_000_000
+
+        let cached = totalCachedTokens
+        let nonCachedInput = max(0, totalInputTokens - cached)
+
+        return Double(nonCachedInput) * inputRate
+             + Double(totalOutputTokens) * outputRate
+             + Double(cached) * cachedRate
+             + totalVideoCost
     }
 
     func persistConversation() async {
@@ -215,7 +267,7 @@ final class ChatViewModel {
         let payloads = await buildPayloads(for: currentBranch)
 
         let smartTitleText = text.isEmpty ? nil : text
-        startStreamingResponse(payloads: payloads, parentId: userMessage.id, smartTitleUserText: smartTitleText)
+        startStreamingResponse(payloads: payloads, parentId: userMessage.id, userText: text, smartTitleUserText: smartTitleText)
     }
 
     // MARK: - Stop
@@ -256,9 +308,11 @@ final class ChatViewModel {
         guard let index = branch.firstIndex(where: { $0.id == message.id }) else { return }
         let messagesUpToParent = Array(branch.prefix(index))
 
+        // Use the parent user message text for intent detection during regeneration
+        let parentUserText = messagesUpToParent.last(where: { $0.role == "user" })?.content ?? ""
         let payloads = await buildPayloads(for: messagesUpToParent)
 
-        startStreamingResponse(payloads: payloads, parentId: parentId)
+        startStreamingResponse(payloads: payloads, parentId: parentId, userText: parentUserText)
     }
 
     // MARK: - Edit & Resend
@@ -314,7 +368,7 @@ final class ChatViewModel {
 
         let payloads = await buildPayloads(for: chain)
 
-        startStreamingResponse(payloads: payloads, parentId: userMessage.id)
+        startStreamingResponse(payloads: payloads, parentId: userMessage.id, userText: userMessage.content)
     }
 
     // MARK: - Delete
@@ -379,7 +433,7 @@ final class ChatViewModel {
 
     // MARK: - Streaming
 
-    private func startStreamingResponse(payloads: [MessagePayload], parentId: String?, smartTitleUserText: String? = nil) {
+    private func startStreamingResponse(payloads: [MessagePayload], parentId: String?, userText: String = "", smartTitleUserText: String? = nil) {
         let assistantMessage = Message(role: "model", content: "", parentId: parentId)
         let assistantMessageId = assistantMessage.id
         let conversationId = conversation.id
@@ -388,7 +442,7 @@ final class ChatViewModel {
         let stream = apiClient.streamContent(
             messages: payloads,
             config: buildConfig(),
-            tools: buildTools(),
+            tools: buildTools(userText: userText),
             systemInstruction: conversation.systemInstruction,
             model: conversation.modelName
         )
@@ -401,17 +455,26 @@ final class ChatViewModel {
 
                 switch event {
                 case .text(let text):
-                    self.streamingMessage?.content += text
+                    if var msg = self.streamingMessage {
+                        msg.content += text
+                        self.streamingMessage = msg
+                    }
                 case .thinking(let thought):
-                    self.streamingMessage?.thinkingContent = (self.streamingMessage?.thinkingContent ?? "") + thought
+                    if var msg = self.streamingMessage {
+                        msg.thinkingContent = (msg.thinkingContent ?? "") + thought
+                        self.streamingMessage = msg
+                    }
                 case .imageData(let data, let mimeType):
                     await self.uploadStreamingMedia(data: data, mimeType: mimeType, messageId: assistantMessageId, conversationId: conversationId)
                 case .functionCall(let name, let args):
                     await self.handleFunctionCall(name: name, args: args, messageId: assistantMessageId, conversationId: conversationId)
                 case .usageMetadata(let input, let output, let cached):
-                    self.streamingMessage?.inputTokens = input
-                    self.streamingMessage?.outputTokens = output
-                    self.streamingMessage?.cachedTokens = cached
+                    if var msg = self.streamingMessage {
+                        msg.inputTokens = input
+                        msg.outputTokens = output
+                        msg.cachedTokens = cached
+                        self.streamingMessage = msg
+                    }
                 case .error(let error):
                     self.errorMessage = error
                 case .done:
@@ -445,29 +508,53 @@ final class ChatViewModel {
         // Only set media on the matching streaming message
         guard streamingMessage?.id == messageId else { return }
 
-        let ext: String
-        switch mimeType {
-        case "image/png":  ext = "png"
-        case "image/webp": ext = "webp"
-        case "video/mp4":  ext = "mp4"
-        default:           ext = "jpg"
-        }
-
-        let mediaDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("media")
-            .appendingPathComponent(conversationId)
-
         do {
-            try FileManager.default.createDirectory(at: mediaDir, withIntermediateDirectories: true)
-            let fileURL = mediaDir.appendingPathComponent("\(messageId).\(ext)")
-            try data.write(to: fileURL)
-            streamingMessage?.mediaURL = fileURL.absoluteString
-            streamingMessage?.mediaMimeType = mimeType
+            let storagePath = try await firestoreService.uploadMedia(
+                data: data,
+                mimeType: mimeType,
+                userId: userId,
+                conversationId: conversationId,
+                messageId: messageId
+            )
+            // Cache locally so we don't need to re-download for display
+            mediaService.cacheMedia(data: data, for: storagePath)
+            if var msg = streamingMessage {
+                msg.mediaURL = storagePath
+                msg.mediaMimeType = mimeType
+                streamingMessage = msg
+            }
         } catch {
-            // Fall back to data URI if disk write fails
-            let base64 = data.base64EncodedString()
-            streamingMessage?.mediaURL = "data:\(mimeType);base64,\(base64)"
-            streamingMessage?.mediaMimeType = mimeType
+            // Fall back to local file if Firebase upload fails
+            logger.error("Firebase upload failed: \(error.localizedDescription), falling back to local file")
+            let ext: String
+            switch mimeType {
+            case "image/png":  ext = "png"
+            case "image/webp": ext = "webp"
+            case "video/mp4":  ext = "mp4"
+            default:           ext = "jpg"
+            }
+
+            let mediaDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("media")
+                .appendingPathComponent(conversationId)
+
+            do {
+                try FileManager.default.createDirectory(at: mediaDir, withIntermediateDirectories: true)
+                let fileURL = mediaDir.appendingPathComponent("\(messageId).\(ext)")
+                try data.write(to: fileURL)
+                if var msg = streamingMessage {
+                    msg.mediaURL = fileURL.absoluteString
+                    msg.mediaMimeType = mimeType
+                    streamingMessage = msg
+                }
+            } catch {
+                let base64 = data.base64EncodedString()
+                if var msg = streamingMessage {
+                    msg.mediaURL = "data:\(mimeType);base64,\(base64)"
+                    msg.mediaMimeType = mimeType
+                    streamingMessage = msg
+                }
+            }
         }
     }
 
@@ -497,6 +584,14 @@ final class ChatViewModel {
                     model: imageModel
                 )
 
+                // Accumulate image generation token usage
+                if let usage = imageResponse.usageMetadata, var msg = self.streamingMessage, msg.id == messageId {
+                    msg.inputTokens = (msg.inputTokens ?? 0) + (usage.promptTokenCount ?? 0)
+                    msg.outputTokens = (msg.outputTokens ?? 0) + (usage.candidatesTokenCount ?? 0)
+                    msg.cachedTokens = (msg.cachedTokens ?? 0) + (usage.cachedContentTokenCount ?? 0)
+                    self.streamingMessage = msg
+                }
+
                 if let parts = imageResponse.candidates.first?.content?.parts {
                     for part in parts {
                         if let inlineData = part.inlineData,
@@ -505,13 +600,19 @@ final class ChatViewModel {
                         }
                         if let text = part.text {
                             guard self.streamingMessage?.id == messageId else { continue }
-                            streamingMessage?.content += text
+                            if var msg = self.streamingMessage {
+                                msg.content += text
+                                self.streamingMessage = msg
+                            }
                         }
                     }
                 }
             } catch {
                 guard self.streamingMessage?.id == messageId else { return }
-                streamingMessage?.content += "\n[Image generation failed: \(error.localizedDescription)]"
+                if var msg = self.streamingMessage {
+                    msg.content += "\n[Image generation failed: \(error.localizedDescription)]"
+                    self.streamingMessage = msg
+                }
             }
         } else if name == "generate_video", let prompt = args["prompt"] {
             let aspectRatio = args["aspectRatio"] ?? "16:9"
@@ -522,9 +623,21 @@ final class ChatViewModel {
                     aspectRatio: aspectRatio
                 )
                 await uploadStreamingMedia(data: videoData, mimeType: "video/mp4", messageId: messageId, conversationId: conversationId)
+
+                // Estimate video cost from duration
+                if var msg = self.streamingMessage, msg.id == messageId {
+                    let duration = await Self.videoDuration(from: videoData)
+                    // Veo per-second pricing
+                    let perSecondRate = 0.35
+                    msg.videoCost = (msg.videoCost ?? 0) + duration * perSecondRate
+                    self.streamingMessage = msg
+                }
             } catch {
                 guard self.streamingMessage?.id == messageId else { return }
-                streamingMessage?.content += "\n[Video generation failed: \(error.localizedDescription)]"
+                if var msg = self.streamingMessage {
+                    msg.content += "\n[Video generation failed: \(error.localizedDescription)]"
+                    self.streamingMessage = msg
+                }
             }
         }
     }
@@ -538,6 +651,21 @@ final class ChatViewModel {
         }
     }
 
+    /// Get the duration of video data in seconds using AVAsset.
+    private static func videoDuration(from data: Data) async -> Double {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        do {
+            try data.write(to: tempURL)
+            let asset = AVURLAsset(url: tempURL)
+            let duration = try await asset.load(.duration)
+            let seconds = CMTimeGetSeconds(duration)
+            return seconds.isFinite ? seconds : 8.0  // fallback to 8s
+        } catch {
+            return 8.0  // Veo typically generates ~8s clips
+        }
+    }
+
     private func buildConfig() -> GenerationConfig {
         GenerationConfig(
             temperature: conversation.temperature,
@@ -548,14 +676,45 @@ final class ChatViewModel {
         )
     }
 
-    private func buildTools() -> ToolsConfig {
-        ToolsConfig(
+    private func buildTools(userText: String) -> ToolsConfig {
+        let intent = detectMediaIntent(from: userText)
+        return ToolsConfig(
             googleSearch: conversation.googleSearchEnabled,
             codeExecution: conversation.codeExecutionEnabled,
             urlContext: conversation.urlContextEnabled,
-            imageGeneration: true,
-            videoGeneration: true
+            imageGeneration: intent.wantsImage,
+            videoGeneration: intent.wantsVideo
         )
+    }
+
+    /// Lightweight intent detection: checks whether the user's message suggests
+    /// they want an image or video generated.
+    private func detectMediaIntent(from text: String) -> (wantsImage: Bool, wantsVideo: Bool) {
+        let lower = text.lowercased()
+
+        // Action verbs that signal generation intent
+        let generationVerbs = ["generate", "create", "make", "draw", "paint",
+                               "sketch", "illustrate", "design", "render",
+                               "produce", "compose", "craft"]
+
+        let imageNouns = ["image", "picture", "photo", "illustration",
+                          "artwork", "drawing", "painting", "portrait",
+                          "sketch", "icon", "logo", "graphic",
+                          "wallpaper", "poster", "banner", "meme"]
+
+        let videoNouns = ["video", "clip", "animation", "movie",
+                          "film", "footage", "motion"]
+
+        // Check for explicit "generate an image" / "make a video" style phrases
+        let hasGenerationVerb = generationVerbs.contains { lower.contains($0) }
+
+        let mentionsImage = imageNouns.contains { lower.contains($0) }
+        let mentionsVideo = videoNouns.contains { lower.contains($0) }
+
+        let wantsImage = hasGenerationVerb && mentionsImage
+        let wantsVideo = hasGenerationVerb && mentionsVideo
+
+        return (wantsImage, wantsVideo)
     }
 
     private func buildPayloads(for messages: [Message]) async -> [MessagePayload] {

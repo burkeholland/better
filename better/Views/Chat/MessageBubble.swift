@@ -30,6 +30,8 @@ struct MessageBubble: View {
     @State private var selectedImage: IdentifiableImage?
     @State private var loadedImage: UIImage?
     @State private var imageLoadFailed = false
+    @State private var localVideoURL: URL?
+    @State private var videoLoadFailed = false
     @State private var selectedPDF: IdentifiableURL?
 
     var body: some View {
@@ -165,8 +167,34 @@ private extension MessageBubble {
             if let urlString = message.mediaURL {
                 if message.isPDF, let url = URL(string: urlString) {
                     pdfCard(url: url)
-                } else if message.mediaMimeType == "video/mp4", let url = URL(string: urlString) {
-                    VideoBubble(videoURL: url, messageId: message.id)
+                } else if message.mediaMimeType == "video/mp4" {
+                    // Video: handle both direct URLs and Firebase Storage paths
+                    if let url = URL(string: urlString), urlString.hasPrefix("http") || urlString.hasPrefix("file://") {
+                        VideoBubble(videoURL: url, messageId: message.id)
+                    } else if let localURL = localVideoURL {
+                        VideoBubble(videoURL: localURL, messageId: message.id)
+                    } else if videoLoadFailed {
+                        Label("Video failed to load", systemImage: "video.slash")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ProgressView("Loading video…")
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 200)
+                            .task {
+                                do {
+                                    let data = try await MediaService.shared.downloadMedia(
+                                        from: urlString,
+                                        maxBytes: 100_000_000
+                                    )
+                                    let tempURL = FileManager.default.temporaryDirectory
+                                        .appendingPathComponent("\(message.id).mp4")
+                                    try data.write(to: tempURL)
+                                    localVideoURL = tempURL
+                                } catch {
+                                    videoLoadFailed = true
+                                }
+                            }
+                    }
                 } else if urlString.hasPrefix("file://"),
                           let fileURL = URL(string: urlString),
                           let uiImage = UIImage(contentsOfFile: fileURL.path) {
