@@ -1,0 +1,63 @@
+:root {
+  --color-peach: #FFAB91;
+  --color-coral: #FF8A65;
+  --color-lavender: #E1BEE7;
+  --color-lilac: #CE93D8;
+  --color-skyBlue: #81D4FA;
+  --color-mint: #A5D6A7;
+  --color-sage: #81C784;
+  --color-cream: #FFF9E6;
+  --color-charcoal: #2C2C2E;
+  --color-darkGray: #48484A;
+  --color-lightGray: #F2F2F7;
+  --color-offBlack: #1C1C1E;
+
+  --gradient-background-light: linear-gradient(135deg, #FFF9E6 0%, #FFE8E0 50%, #F5E6FF 100%);
+  --gradient-background-dark: linear-gradient(135deg, #1C1C1E 0%, #2C2C2E 100%);
+  --gradient-accent: linear-gradient(135deg, #FF8A65 0%, #CE93D8 50%, #81D4FA 100%);
+  --gradient-user-bubble: linear-gradient(135deg, #E1BEE7 0%, #CE93D8 100%);
+  --gradient-send-button: linear-gradient(135deg, #FF8A65 0%, #FF6B6B 100%);
+}
+
+.dark {
+  --background-primary: var(--color-offBlack);
+  --text-primary: var(--color-lightGray);
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Glassmorphism utilities */
+.glass {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.dark .glass {
+  background: rgba(28, 28, 30, 0.7);
+}
+
+.glass-panel {
+  background: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.dark .glass-panel {
+  background: rgba(44, 44, 46, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Scrollbar hiding for clean look */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
