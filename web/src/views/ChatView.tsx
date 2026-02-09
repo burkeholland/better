@@ -8,7 +8,7 @@ import BranchNavigator from '../components/chat/BranchNavigator';
 import ThinkingIndicator from '../components/chat/ThinkingIndicator';
 import GradientIcon from '../components/shared/GradientIcon';
 import { Conversation } from '../models/Conversation';
-import { Message, createUserMessage, createModelMessage } from '../models/Message';
+import { Message, createUserMessage, createModelMessage, hasMedia } from '../models/Message';
 import { buildGeminiPayload, attachMediaToMessage } from '../logic/messagePayload';
 import { GeminiAPIClient } from '../services/gemini/client';
 import { handleFunctionCall, handleGenerateImage, handleGenerateVideo } from '../services/gemini/toolHandlers';
@@ -204,6 +204,12 @@ const ChatView: React.FC = () => {
 
     const intent = detectIntent(text);
 
+    // Check if the most recent model message has a generated image.
+    // If so, route through the image model so the user can iterate on it
+    // (e.g. "make it cuter", "add a hat", etc.).
+    const lastModelMessage = [...messages].reverse().find((m) => m.role === 'model');
+    const hasRecentImage = lastModelMessage != null && hasMedia(lastModelMessage);
+
     setIsGenerating(true);
     const modelMessage = createModelMessage('');
     setMessages((prev) => [...prev, modelMessage]);
@@ -220,10 +226,15 @@ const ChatView: React.FC = () => {
     };
 
     try {
-      if (intent === 'image') {
-        const result = await handleGenerateImage(text, apiKey);
+      if (intent === 'image' || hasRecentImage) {
+        // Build full conversation payload with images for multi-turn iteration
+        const payload = await buildGeminiPayload([...messages, newUserMsg], true);
+        const result = await handleGenerateImage(text, apiKey, payload);
         if (result.data && result.mimeType) {
-          updateModelMessage(attachMediaToMessage(currentModelMessage, result.data, result.mimeType));
+          const withMedia = attachMediaToMessage(currentModelMessage, result.data, result.mimeType);
+          updateModelMessage({ ...withMedia, content: result.text || '' });
+        } else if (result.text) {
+          updateModelMessage({ content: result.text });
         } else if (result.error) {
           updateModelMessage({ content: result.error });
         }

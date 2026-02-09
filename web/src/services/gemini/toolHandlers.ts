@@ -1,4 +1,4 @@
-import type { FunctionCall, GeminiResponse } from './types';
+import type { FunctionCall, GeminiMessage, GeminiResponse } from './types';
 
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/';
 const IMAGE_MODELS = ['gemini-2.5-flash-image', 'gemini-3-pro-image-preview'];
@@ -9,6 +9,7 @@ export interface ToolResult {
   mimeType?: string;
   url?: string;
   error?: string;
+  text?: string;
 }
 
 const buildURL = (model: string, apiKey: string): string => {
@@ -31,33 +32,53 @@ const parseResponseError = async (response: Response): Promise<string> => {
   return `Gemini API request failed (${response.status}).`;
 };
 
-const extractInlineImage = (payload: GeminiResponse): { data: string; mimeType: string } | null => {
+const extractResponseContent = (
+  payload: GeminiResponse
+): { data?: string; mimeType?: string; text?: string } | null => {
   const parts = payload.candidates?.[0]?.content?.parts ?? [];
+  let imageData: string | undefined;
+  let imageMimeType: string | undefined;
+  let text = '';
 
   for (const part of parts) {
     if ('inline_data' in part) {
-      const data = part.inline_data?.data;
-      const mimeType = part.inline_data?.mime_type ?? 'image/png';
-      if (data) {
-        return { data, mimeType };
-      }
+      imageData = part.inline_data?.data;
+      imageMimeType = part.inline_data?.mime_type ?? 'image/png';
     }
+    if ('text' in part && !('thought' in part)) {
+      text += part.text;
+    }
+  }
+
+  if (imageData || text) {
+    return { data: imageData, mimeType: imageMimeType, text: text || undefined };
   }
 
   return null;
 };
 
-export const handleGenerateImage = async (prompt: string, apiKey: string): Promise<ToolResult> => {
+export const handleGenerateImage = async (
+  prompt: string,
+  apiKey: string,
+  history?: GeminiMessage[]
+): Promise<ToolResult> => {
   if (!prompt.trim()) {
     return { type: 'image', error: 'Image generation requires a prompt.' };
   }
+
+  // Use full conversation history for multi-turn image iteration,
+  // or a simple single-turn prompt for new image generation.
+  const contents: GeminiMessage[] =
+    history && history.length > 0
+      ? history
+      : [{ role: 'user', parts: [{ text: prompt }] }];
 
   let lastError: string | null = null;
   for (const model of IMAGE_MODELS) {
     const url = buildURL(model, apiKey);
     const body = {
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { responseModalities: ['IMAGE'] },
+      contents,
+      generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
     };
 
     try {
@@ -73,9 +94,14 @@ export const handleGenerateImage = async (prompt: string, apiKey: string): Promi
       }
 
       const payload = (await response.json()) as GeminiResponse;
-      const inlineImage = extractInlineImage(payload);
-      if (inlineImage) {
-        return { type: 'image', data: inlineImage.data, mimeType: inlineImage.mimeType };
+      const content = extractResponseContent(payload);
+      if (content) {
+        return {
+          type: 'image',
+          data: content.data,
+          mimeType: content.mimeType,
+          text: content.text,
+        };
       }
 
       lastError = 'No image data returned from Gemini.';
