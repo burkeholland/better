@@ -55,19 +55,20 @@ struct ThinkingIndicator: View {
 
 /// A more elaborate thinking animation with a text label
 struct ThinkingView: View {
+    var label: String = "Thinking"
     @State private var isAnimating = false
     @State private var textOpacity: Double = 0.4
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             // Animated bloom icon
-            Image(systemName: "sparkle")
+            Image(systemName: iconName)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Theme.accentGradient)
                 .scaleEffect(isAnimating ? 1.15 : 0.85)
                 .opacity(isAnimating ? 1.0 : 0.5)
 
-            Text("Thinking")
+            Text(label)
                 .font(.subheadline)
                 .fontWeight(.medium)
                 .foregroundStyle(.secondary)
@@ -85,6 +86,16 @@ struct ThinkingView: View {
                 isAnimating = true
                 textOpacity = 0.8
             }
+        }
+    }
+
+    private var iconName: String {
+        if label.contains("image") {
+            return "photo"
+        } else if label.contains("video") {
+            return "film"
+        } else {
+            return "sparkle"
         }
     }
 }

@@ -21,6 +21,8 @@ struct Conversation: Codable, Identifiable, Equatable, Hashable {
     var googleSearchEnabled: Bool
     var codeExecutionEnabled: Bool
     var urlContextEnabled: Bool
+    var imageGenerationEnabled: Bool
+    var videoGenerationEnabled: Bool
 
     init(
         id: String = UUID().uuidString,
@@ -45,5 +47,7 @@ struct Conversation: Codable, Identifiable, Equatable, Hashable {
         self.googleSearchEnabled = false
         self.codeExecutionEnabled = false
         self.urlContextEnabled = false
+        self.imageGenerationEnabled = false
+        self.videoGenerationEnabled = false
     }
 }

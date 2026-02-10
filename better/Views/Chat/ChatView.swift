@@ -40,6 +40,7 @@ struct ChatView: View {
                                     MessageBubble(
                                         message: message,
                                         isStreaming: viewModel.streamingMessage?.id == message.id,
+                                        generationStatus: viewModel.generationStatus,
                                         branchInfo: viewModel.branchInfo(for: message),
                                         onRegenerate: {
                                             Task { await viewModel.regenerate(from: message) }
@@ -140,21 +141,10 @@ struct ChatView: View {
         .navigationTitle(viewModel.conversation.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if viewModel.hasTokenData {
-                ToolbarItem(placement: .principal) {
-                    VStack(spacing: 2) {
-                        Text(viewModel.conversation.title)
-                            .font(.headline)
-                            .lineLimit(1)
-                        TokenUsageBar(
-                            inputTokens: viewModel.totalInputTokens,
-                            outputTokens: viewModel.totalOutputTokens,
-                            cachedTokens: viewModel.totalCachedTokens,
-                            estimatedCost: viewModel.estimatedCost,
-                            isStreaming: viewModel.isGenerating
-                        )
-                    }
-                }
+            ToolbarItem(placement: .principal) {
+                Text(viewModel.conversation.title)
+                    .font(.headline)
+                    .lineLimit(1)
             }
         }
         .sheet(isPresented: $showChatSettings, onDismiss: {

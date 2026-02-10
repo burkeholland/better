@@ -12,6 +12,7 @@ final class ChatViewModel {
     var conversation: Conversation
     var messageText: String = ""
     var isGenerating: Bool = false
+    var generationStatus: String = "Thinking"
     var errorMessage: String?
     var streamingMessage: Message?
     var messages: [Message] = []
@@ -267,7 +268,7 @@ final class ChatViewModel {
         let payloads = await buildPayloads(for: currentBranch)
 
         let smartTitleText = text.isEmpty ? nil : text
-        startStreamingResponse(payloads: payloads, parentId: userMessage.id, userText: text, smartTitleUserText: smartTitleText)
+        startStreamingResponse(payloads: payloads, parentId: userMessage.id, userText: text, smartTitleUserText: smartTitleText, hasAttachment: attachment != nil)
     }
 
     // MARK: - Stop
@@ -433,21 +434,27 @@ final class ChatViewModel {
 
     // MARK: - Streaming
 
-    private func startStreamingResponse(payloads: [MessagePayload], parentId: String?, userText: String = "", smartTitleUserText: String? = nil) {
+    private func startStreamingResponse(payloads: [MessagePayload], parentId: String?, userText: String = "", smartTitleUserText: String? = nil, hasAttachment: Bool = false) {
         let assistantMessage = Message(role: "model", content: "", parentId: parentId)
         let assistantMessageId = assistantMessage.id
         let conversationId = conversation.id
         streamingMessage = assistantMessage
-
-        let stream = apiClient.streamContent(
-            messages: payloads,
-            config: buildConfig(),
-            tools: buildTools(userText: userText),
-            systemInstruction: conversation.systemInstruction,
-            model: conversation.modelName
-        )
+        generationStatus = "Thinking"
 
         streamTask = Task {
+            let tools = await buildTools(userText: userText, hasAttachment: hasAttachment)
+            let systemInstruction = buildSystemInstruction(tools: tools)
+
+            logger.info("Tools — image: \(tools.imageGeneration), video: \(tools.videoGeneration), search: \(tools.googleSearch)")
+            logger.info("System instruction: \(systemInstruction)")
+
+            let stream = apiClient.streamContent(
+                messages: payloads,
+                config: buildConfig(),
+                tools: tools,
+                systemInstruction: systemInstruction,
+                model: conversation.modelName
+            )
             for await event in stream {
                 if Task.isCancelled { break }
                 // Only mutate if our message is still the active streaming message
@@ -560,6 +567,7 @@ final class ChatViewModel {
 
     private func handleFunctionCall(name: String, args: [String: String], messageId: String, conversationId: String) async {
         if name == "generate_image", let prompt = args["prompt"] {
+            generationStatus = "Creating image…"
             let imageModel = conversation.modelName == Constants.Models.pro
                 ? Constants.Models.proImage
                 : Constants.Models.flashImage
@@ -615,7 +623,10 @@ final class ChatViewModel {
                 }
             }
         } else if name == "generate_video", let prompt = args["prompt"] {
-            let aspectRatio = args["aspectRatio"] ?? "16:9"
+            generationStatus = "Creating video…"
+            let supportedRatios: Set<String> = ["16:9", "9:16"]
+            let rawRatio = args["aspectRatio"] ?? "16:9"
+            let aspectRatio = supportedRatios.contains(rawRatio) ? rawRatio : "16:9"
 
             do {
                 let videoData = try await apiClient.generateVideo(
@@ -676,43 +687,102 @@ final class ChatViewModel {
         )
     }
 
-    private func buildTools(userText: String) -> ToolsConfig {
-        let intent = detectMediaIntent(from: userText)
+    /// Builds the system instruction, combining the user's custom instruction
+    /// with tool-awareness guidance so the model knows its capabilities.
+    private func buildSystemInstruction(tools: ToolsConfig) -> String {
+        var parts: [String] = []
+
+        // Base identity — strongly prevent ChatGPT/DALL-E impersonation
+        parts.append(
+            """
+            You are Gemini, a large language model by Google. \
+            IMPORTANT RULES YOU MUST FOLLOW:
+            - NEVER output JSON with "action", "action_input", "dalle", or "thought" fields.
+            - NEVER reference or imitate ChatGPT, DALL-E, Claude, or any other AI system.
+            - NEVER suggest using Runway, Luma, Pika, or other external AI tools for image/video generation.
+            - If you have a function tool available, you MUST use it via function calling, not by outputting JSON text.
+            - If you do NOT have a function tool for a task, say so plainly without pretending you have one.
+            """
+        )
+
+        // Inform the model about its available tools
+        var capabilities: [String] = []
+        if tools.imageGeneration {
+            capabilities.append("You have a generate_image function tool. When the user wants an image, call it via function calling. Do NOT output a text-based prompt — use the tool.")
+        }
+        if tools.videoGeneration {
+            capabilities.append("You have a generate_video function tool. When the user wants a video, call it via function calling. Do NOT output a text-based prompt — use the tool.")
+        }
+        if tools.googleSearch {
+            capabilities.append("You can search the web using Google Search.")
+        }
+        if tools.codeExecution {
+            capabilities.append("You can execute code.")
+        }
+        if !capabilities.isEmpty {
+            parts.append(capabilities.joined(separator: " "))
+        }
+
+        // Append user's custom system instruction if present
+        if let custom = conversation.systemInstruction, !custom.isEmpty {
+            parts.append(custom)
+        }
+
+        return parts.joined(separator: "\n\n")
+    }
+
+    private func buildTools(userText: String, hasAttachment: Bool = false) async -> ToolsConfig {
+        // Only run intent detection if the user has enabled the toggles
+        var wantsImage = false
+        var wantsVideo = false
+
+        logger.info("Toggle state — imageGen: \(self.conversation.imageGenerationEnabled), videoGen: \(self.conversation.videoGenerationEnabled)")
+
+        if conversation.imageGenerationEnabled || conversation.videoGenerationEnabled {
+            if !userText.isEmpty {
+                let aiIntent = await apiClient.classifyMediaIntent(userMessage: userText, hasAttachment: hasAttachment)
+                logger.info("AI intent — image: \(aiIntent.wantsImage), video: \(aiIntent.wantsVideo)")
+                if aiIntent.wantsImage || aiIntent.wantsVideo {
+                    wantsImage = aiIntent.wantsImage
+                    wantsVideo = aiIntent.wantsVideo
+                } else {
+                    let kw = keywordMediaIntent(from: userText)
+                    logger.info("Keyword fallback — image: \(kw.wantsImage), video: \(kw.wantsVideo)")
+                    wantsImage = kw.wantsImage
+                    wantsVideo = kw.wantsVideo
+                }
+            }
+            // Respect the toggles — only enable tools the user has turned on
+            wantsImage = wantsImage && conversation.imageGenerationEnabled
+            wantsVideo = wantsVideo && conversation.videoGenerationEnabled
+        }
+
         return ToolsConfig(
             googleSearch: conversation.googleSearchEnabled,
             codeExecution: conversation.codeExecutionEnabled,
             urlContext: conversation.urlContextEnabled,
-            imageGeneration: intent.wantsImage,
-            videoGeneration: intent.wantsVideo
+            imageGeneration: wantsImage,
+            videoGeneration: wantsVideo
         )
     }
 
-    /// Lightweight intent detection: checks whether the user's message suggests
-    /// they want an image or video generated.
-    private func detectMediaIntent(from text: String) -> (wantsImage: Bool, wantsVideo: Bool) {
+    /// Fast keyword-based fallback for intent detection when AI classification
+    /// returns no intent (e.g. API failure or ambiguous result).
+    private func keywordMediaIntent(from text: String) -> (wantsImage: Bool, wantsVideo: Bool) {
         let lower = text.lowercased()
 
-        // Action verbs that signal generation intent
-        let generationVerbs = ["generate", "create", "make", "draw", "paint",
-                               "sketch", "illustrate", "design", "render",
-                               "produce", "compose", "craft"]
+        let imageKeywords = ["generate image", "create image", "draw", "make a picture",
+                             "generate a photo", "create a photo", "make an image",
+                             "paint", "sketch", "illustrate", "design a logo",
+                             "create a poster", "generate a graphic"]
 
-        let imageNouns = ["image", "picture", "photo", "illustration",
-                          "artwork", "drawing", "painting", "portrait",
-                          "sketch", "icon", "logo", "graphic",
-                          "wallpaper", "poster", "banner", "meme"]
+        let videoKeywords = ["generate video", "create video", "make a video",
+                             "animate", "turn into a video", "convert to video",
+                             "make a clip", "create a clip", "film",
+                             "generate a movie", "make an animation"]
 
-        let videoNouns = ["video", "clip", "animation", "movie",
-                          "film", "footage", "motion"]
-
-        // Check for explicit "generate an image" / "make a video" style phrases
-        let hasGenerationVerb = generationVerbs.contains { lower.contains($0) }
-
-        let mentionsImage = imageNouns.contains { lower.contains($0) }
-        let mentionsVideo = videoNouns.contains { lower.contains($0) }
-
-        let wantsImage = hasGenerationVerb && mentionsImage
-        let wantsVideo = hasGenerationVerb && mentionsVideo
+        let wantsImage = imageKeywords.contains { lower.contains($0) }
+        let wantsVideo = videoKeywords.contains { lower.contains($0) }
 
         return (wantsImage, wantsVideo)
     }

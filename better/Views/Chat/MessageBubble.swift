@@ -16,6 +16,7 @@ struct IdentifiableURL: Identifiable {
 struct MessageBubble: View {
     let message: Message
     let isStreaming: Bool
+    let generationStatus: String
     let branchInfo: (current: Int, total: Int)
     let onRegenerate: () -> Void
     let onEdit: (String) -> Void
@@ -161,7 +162,7 @@ private extension MessageBubble {
     var messageContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             if isStreaming && message.content.isEmpty {
-                ThinkingView()
+                ThinkingView(label: generationStatus)
             }
 
             if let urlString = message.mediaURL {

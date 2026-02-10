@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.postrboard.better", category: "GeminiAPIClient")
 
 struct MessagePayload: Sendable {
     let role: String
@@ -198,6 +201,75 @@ final class GeminiAPIClient {
         }
     }
 
+    /// Fast intent classification using Flash to determine whether the user wants
+    /// image or video generation. Returns (wantsImage, wantsVideo). Uses minimal
+    /// tokens and the cheapest model for speed.
+    func classifyMediaIntent(userMessage: String, hasAttachment: Bool) async -> (wantsImage: Bool, wantsVideo: Bool) {
+        do {
+            let apiKey = try requireAPIKey()
+
+            let attachmentContext = hasAttachment
+                ? " The user has also attached media (image or PDF) with this message."
+                : ""
+
+            let classificationPrompt = """
+            Classify the user's intent. Does this message request generating an image or video?
+
+            Rules:
+            - "image": true if the user wants a NEW image created/generated/drawn/designed
+            - "video": true if the user wants a NEW video created/generated/animated
+            - Asking questions ABOUT images/videos is NOT generation intent
+            - Editing, analyzing, or describing an existing image is NOT generation intent
+            - "Turn this into a video" or "animate this" with an attachment IS video intent
+
+            User message: "\(userMessage)"\(attachmentContext)
+
+            Respond with ONLY valid JSON, no markdown: {"image": bool, "video": bool}
+            """
+
+            let payload: [String: Any] = [
+                "contents": [["parts": [["text": classificationPrompt]]]],
+                "generationConfig": [
+                    "temperature": 0,
+                    "maxOutputTokens": 20
+                ]
+            ]
+
+            let model = Constants.Models.flash
+            let endpoint = "models/\(model):generateContent?key=\(apiKey)"
+            var request = try makeRequest(endpoint: endpoint, method: "POST")
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validateResponse(response, data: data)
+
+            let decoded = try JSONDecoder().decode(GenerateContentResponse.self, from: data)
+            guard let responseText = decoded.candidates.first?.content?.parts?.first?.text else {
+                return (false, false)
+            }
+
+            // Parse the JSON response — strip any markdown fencing
+            let cleaned = responseText
+                .replacingOccurrences(of: "```json", with: "")
+                .replacingOccurrences(of: "```", with: "")
+                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+
+            if let jsonData = cleaned.data(using: String.Encoding.utf8),
+               let result = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Bool] {
+                let wantsImage = result["image"] ?? false
+                let wantsVideo = result["video"] ?? false
+                logger.info("AI intent classification: image=\(wantsImage), video=\(wantsVideo) for: \(userMessage)")
+                return (wantsImage, wantsVideo)
+            }
+
+            return (false, false)
+        } catch {
+            logger.warning("Intent classification failed, falling back: \(error.localizedDescription)")
+            return (false, false)
+        }
+    }
+
     func generateVideo(prompt: String, aspectRatio: String? = nil) async throws -> Data {
         let apiKey = try requireAPIKey()
         let requestBody = GenerateVideoRequest(
@@ -234,19 +306,11 @@ final class GeminiAPIClient {
                 }
             }
 
-            print("Video generation complete, checking for URI...")
-
-            if status.response == nil {
-                print("Response is nil")
-            } else if status.response?.generateVideoResponse == nil {
-                print("generateVideoResponse is nil")
-            } else if status.response?.generateVideoResponse?.generatedSamples == nil ||
-                      status.response?.generateVideoResponse?.generatedSamples?.isEmpty == true {
-                print("generatedSamples is nil or empty")
-            } else if status.response?.generateVideoResponse?.generatedSamples?.first?.video == nil {
-                print("video is nil")
-            } else if status.response?.generateVideoResponse?.generatedSamples?.first?.video?.uri == nil {
-                print("uri is nil")
+            // Check if the video was blocked by safety filters
+            if let filteredReasons = status.response?.generateVideoResponse?.raiMediaFilteredReasons,
+               !filteredReasons.isEmpty {
+                let reason = filteredReasons.first ?? "Unknown safety filter reason"
+                throw GeminiAPIError.invalidResponse(message: reason)
             }
 
             guard let uri = status.response?.generateVideoResponse?.generatedSamples?.first?.video?.uri else {
@@ -310,11 +374,17 @@ final class GeminiAPIClient {
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         let (data, response) = try await URLSession.shared.data(for: request)
         try validateResponse(response, data: data)
+
+        // Always log raw JSON when done so we can debug response structure
+        let rawJSON = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+        if rawJSON.contains("\"done\": true") || rawJSON.contains("\"done\":true") {
+            logger.info("Video operation completed. Raw JSON: \(rawJSON)")
+        }
+
         do {
             return try JSONDecoder().decode(GenerateVideoOperationStatus.self, from: data)
         } catch {
-            print("Failed to decode video operation status. Raw JSON:")
-            print(String(data: data, encoding: .utf8) ?? "<non-utf8 data>")
+            logger.error("Failed to decode video operation status. Raw JSON: \(rawJSON)")
             throw error
         }
     }
@@ -462,7 +532,7 @@ final class GeminiAPIClient {
                         ),
                         "aspectRatio": FunctionProperty(
                             type: "string",
-                            description: "Video aspect ratio: '16:9' for landscape, '9:16' for portrait, or '1:1' for square. Default is '16:9'."
+                            description: "Video aspect ratio: '16:9' for landscape or '9:16' for portrait. Default is '16:9'."
                         )
                     ],
                     required: ["prompt"]
@@ -600,6 +670,8 @@ private struct GenerateVideoOperationResponse: Decodable {
 
 private struct GenerateVideoResponseBody: Decodable {
     let generatedSamples: [GenerateVideoSample]?
+    let raiMediaFilteredCount: Int?
+    let raiMediaFilteredReasons: [String]?
 }
 
 private struct GenerateVideoSample: Decodable {
