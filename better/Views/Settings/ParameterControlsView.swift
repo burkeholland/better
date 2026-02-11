@@ -67,8 +67,6 @@ struct ParameterControlsView: View {
                 Toggle("Google Search", isOn: $conversation.googleSearchEnabled)
                 Toggle("Code Execution", isOn: $conversation.codeExecutionEnabled)
                 Toggle("URL Context", isOn: $conversation.urlContextEnabled)
-                Toggle("Image Generation", isOn: $conversation.imageGenerationEnabled)
-                Toggle("Video Generation", isOn: $conversation.videoGenerationEnabled)
             }
         }
         .navigationTitle("Chat Settings")

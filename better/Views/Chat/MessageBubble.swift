@@ -298,10 +298,6 @@ private extension MessageBubble {
             if isStreaming && !message.content.isEmpty {
                 streamingCursor
             }
-
-            if let input = message.inputTokens, let output = message.outputTokens {
-                tokenCounts(input: input, output: output, cached: message.cachedTokens)
-            }
         }
         .fullScreenCover(item: $selectedImage) { item in
             ImageViewer(image: item.image)
@@ -319,21 +315,6 @@ private extension MessageBubble {
             .scaleEffect(x: 1.0, y: showStreamingCursor ? 1.0 : 0.7, anchor: .center)
             .padding(.top, 2)
             .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: showStreamingCursor)
-    }
-
-    func tokenCounts(input: Int, output: Int, cached: Int?) -> some View {
-        let cachedText = cached.map { " · \($0) cached" } ?? ""
-        return HStack(spacing: 6) {
-            HStack(spacing: 4) {
-                Circle().fill(Theme.mint).frame(width: 6, height: 6)
-                Circle().fill(Theme.lavender).frame(width: 6, height: 6)
-                Circle().fill(Theme.peach).frame(width: 6, height: 6)
-            }
-
-            Text("\(input) in · \(output) out\(cachedText)")
-                .font(.caption2)
-                .foregroundStyle(Theme.charcoal.opacity(0.6))
-        }
     }
 
     func pdfCard(url: URL) -> some View {

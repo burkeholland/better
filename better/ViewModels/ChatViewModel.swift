@@ -445,8 +445,8 @@ final class ChatViewModel {
             let tools = await buildTools(userText: userText, hasAttachment: hasAttachment)
             let systemInstruction = buildSystemInstruction(tools: tools)
 
-            logger.info("Tools — image: \(tools.imageGeneration), video: \(tools.videoGeneration), search: \(tools.googleSearch)")
-            logger.info("System instruction: \(systemInstruction)")
+            print("🔧 Tools — image: \(tools.imageGeneration), video: \(tools.videoGeneration), search: \(tools.googleSearch)")
+            print("📝 System instruction: \(systemInstruction)")
 
             let stream = apiClient.streamContent(
                 messages: payloads,
@@ -567,7 +567,11 @@ final class ChatViewModel {
 
     private func handleFunctionCall(name: String, args: [String: String], messageId: String, conversationId: String) async {
         if name == "generate_image", let prompt = args["prompt"] {
-            generationStatus = "Creating image…"
+            if var msg = streamingMessage, msg.id == messageId, !msg.content.isEmpty {
+                msg.content = ""
+                streamingMessage = msg
+            }
+            generationStatus = "Generating image…"
             let imageModel = conversation.modelName == Constants.Models.pro
                 ? Constants.Models.proImage
                 : Constants.Models.flashImage
@@ -600,19 +604,29 @@ final class ChatViewModel {
                     self.streamingMessage = msg
                 }
 
+                generationStatus = "Uploading…"
+                var hasImageData = false
                 if let parts = imageResponse.candidates.first?.content?.parts {
                     for part in parts {
                         if let inlineData = part.inlineData,
                            let data = Data(base64Encoded: inlineData.data) {
                             await uploadStreamingMedia(data: data, mimeType: inlineData.mimeType, messageId: messageId, conversationId: conversationId)
-                        }
-                        if let text = part.text {
-                            guard self.streamingMessage?.id == messageId else { continue }
-                            if var msg = self.streamingMessage {
+                            hasImageData = true
+                        } else if let text = part.text, !text.isEmpty {
+                            // Handle text-only response (e.g., safety refusal)
+                            if var msg = self.streamingMessage, msg.id == messageId {
                                 msg.content += text
                                 self.streamingMessage = msg
                             }
                         }
+                    }
+                }
+                
+                // If no image data was returned, show a message
+                if !hasImageData {
+                    if var msg = self.streamingMessage, msg.id == messageId, msg.content.isEmpty {
+                        msg.content = "Image could not be generated."
+                        self.streamingMessage = msg
                     }
                 }
             } catch {
@@ -623,7 +637,7 @@ final class ChatViewModel {
                 }
             }
         } else if name == "generate_video", let prompt = args["prompt"] {
-            generationStatus = "Creating video…"
+            generationStatus = "Generating video…"
             let supportedRatios: Set<String> = ["16:9", "9:16"]
             let rawRatio = args["aspectRatio"] ?? "16:9"
             let aspectRatio = supportedRatios.contains(rawRatio) ? rawRatio : "16:9"
@@ -633,6 +647,7 @@ final class ChatViewModel {
                     prompt: prompt,
                     aspectRatio: aspectRatio
                 )
+                generationStatus = "Uploading…"
                 await uploadStreamingMedia(data: videoData, mimeType: "video/mp4", messageId: messageId, conversationId: conversationId)
 
                 // Estimate video cost from duration
@@ -692,36 +707,20 @@ final class ChatViewModel {
     private func buildSystemInstruction(tools: ToolsConfig) -> String {
         var parts: [String] = []
 
-        // Base identity — strongly prevent ChatGPT/DALL-E impersonation
-        parts.append(
-            """
-            You are Gemini, a large language model by Google. \
-            IMPORTANT RULES YOU MUST FOLLOW:
-            - NEVER output JSON with "action", "action_input", "dalle", or "thought" fields.
-            - NEVER reference or imitate ChatGPT, DALL-E, Claude, or any other AI system.
-            - NEVER suggest using Runway, Luma, Pika, or other external AI tools for image/video generation.
-            - If you have a function tool available, you MUST use it via function calling, not by outputting JSON text.
-            - If you do NOT have a function tool for a task, say so plainly without pretending you have one.
-            """
-        )
+        // Minimal identity
+        parts.append("You are Gemini, a large language model by Google.")
 
-        // Inform the model about its available tools
+        // Inform the model about its capabilities
         var capabilities: [String] = []
-        if tools.imageGeneration {
-            capabilities.append("You have a generate_image function tool. When the user wants an image, call it via function calling. Do NOT output a text-based prompt — use the tool.")
-        }
-        if tools.videoGeneration {
-            capabilities.append("You have a generate_video function tool. When the user wants a video, call it via function calling. Do NOT output a text-based prompt — use the tool.")
-        }
+        capabilities.append("You can generate images using the generate_image tool when the user wants images created or modified.")
+        capabilities.append("You can generate videos using the generate_video tool when the user wants videos created, or wants to animate/convert images to video.")
         if tools.googleSearch {
-            capabilities.append("You can search the web using Google Search.")
+            capabilities.append("Use Google Search for current information.")
         }
         if tools.codeExecution {
-            capabilities.append("You can execute code.")
+            capabilities.append("You can execute code when needed.")
         }
-        if !capabilities.isEmpty {
-            parts.append(capabilities.joined(separator: " "))
-        }
+        parts.append(capabilities.joined(separator: " "))
 
         // Append user's custom system instruction if present
         if let custom = conversation.systemInstruction, !custom.isEmpty {
@@ -732,59 +731,15 @@ final class ChatViewModel {
     }
 
     private func buildTools(userText: String, hasAttachment: Bool = false) async -> ToolsConfig {
-        // Only run intent detection if the user has enabled the toggles
-        var wantsImage = false
-        var wantsVideo = false
-
-        logger.info("Toggle state — imageGen: \(self.conversation.imageGenerationEnabled), videoGen: \(self.conversation.videoGenerationEnabled)")
-
-        if conversation.imageGenerationEnabled || conversation.videoGenerationEnabled {
-            if !userText.isEmpty {
-                let aiIntent = await apiClient.classifyMediaIntent(userMessage: userText, hasAttachment: hasAttachment)
-                logger.info("AI intent — image: \(aiIntent.wantsImage), video: \(aiIntent.wantsVideo)")
-                if aiIntent.wantsImage || aiIntent.wantsVideo {
-                    wantsImage = aiIntent.wantsImage
-                    wantsVideo = aiIntent.wantsVideo
-                } else {
-                    let kw = keywordMediaIntent(from: userText)
-                    logger.info("Keyword fallback — image: \(kw.wantsImage), video: \(kw.wantsVideo)")
-                    wantsImage = kw.wantsImage
-                    wantsVideo = kw.wantsVideo
-                }
-            }
-            // Respect the toggles — only enable tools the user has turned on
-            wantsImage = wantsImage && conversation.imageGenerationEnabled
-            wantsVideo = wantsVideo && conversation.videoGenerationEnabled
-        }
-
+        // Always include image and video tools - the model will decide when to use them
+        // This avoids prompt leakage where the model outputs JSON instead of calling functions
         return ToolsConfig(
             googleSearch: conversation.googleSearchEnabled,
             codeExecution: conversation.codeExecutionEnabled,
             urlContext: conversation.urlContextEnabled,
-            imageGeneration: wantsImage,
-            videoGeneration: wantsVideo
+            imageGeneration: true,
+            videoGeneration: true
         )
-    }
-
-    /// Fast keyword-based fallback for intent detection when AI classification
-    /// returns no intent (e.g. API failure or ambiguous result).
-    private func keywordMediaIntent(from text: String) -> (wantsImage: Bool, wantsVideo: Bool) {
-        let lower = text.lowercased()
-
-        let imageKeywords = ["generate image", "create image", "draw", "make a picture",
-                             "generate a photo", "create a photo", "make an image",
-                             "paint", "sketch", "illustrate", "design a logo",
-                             "create a poster", "generate a graphic"]
-
-        let videoKeywords = ["generate video", "create video", "make a video",
-                             "animate", "turn into a video", "convert to video",
-                             "make a clip", "create a clip", "film",
-                             "generate a movie", "make an animation"]
-
-        let wantsImage = imageKeywords.contains { lower.contains($0) }
-        let wantsVideo = videoKeywords.contains { lower.contains($0) }
-
-        return (wantsImage, wantsVideo)
     }
 
     private func buildPayloads(for messages: [Message]) async -> [MessagePayload] {

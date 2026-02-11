@@ -201,10 +201,27 @@ final class GeminiAPIClient {
         }
     }
 
+    /// Summary of a message for intent classification context.
+    struct MessageSummary: Sendable {
+        let role: String
+        let hasGeneratedImage: Bool
+        let hasGeneratedVideo: Bool
+        let textPreview: String
+    }
+
     /// Fast intent classification using Flash to determine whether the user wants
     /// image or video generation. Returns (wantsImage, wantsVideo). Uses minimal
     /// tokens and the cheapest model for speed.
-    func classifyMediaIntent(userMessage: String, hasAttachment: Bool) async -> (wantsImage: Bool, wantsVideo: Bool) {
+    ///
+    /// - Parameters:
+    ///   - userMessage: The current user message to classify
+    ///   - hasAttachment: Whether the user attached media to this message
+    ///   - conversationContext: Summary of recent messages for context-aware iteration
+    func classifyMediaIntent(
+        userMessage: String,
+        hasAttachment: Bool,
+        conversationContext: [MessageSummary] = []
+    ) async -> (wantsImage: Bool, wantsVideo: Bool) {
         do {
             let apiKey = try requireAPIKey()
 
@@ -212,15 +229,36 @@ final class GeminiAPIClient {
                 ? " The user has also attached media (image or PDF) with this message."
                 : ""
 
+            // Build conversation context summary for the AI
+            var contextSection = ""
+            if !conversationContext.isEmpty {
+                let contextLines = conversationContext.enumerated().map { index, msg in
+                    var desc = "[\(msg.role)]"
+                    if msg.hasGeneratedImage { desc += " [generated image]" }
+                    if msg.hasGeneratedVideo { desc += " [generated video]" }
+                    desc += " \(msg.textPreview)"
+                    return "\(index + 1). \(desc)"
+                }
+                contextSection = """
+                
+                Recent conversation context:
+                \(contextLines.joined(separator: "\n"))
+                
+                """
+            }
+
             let classificationPrompt = """
             Classify the user's intent. Does this message request generating an image or video?
-
+            \(contextSection)
             Rules:
             - "image": true if the user wants a NEW image created/generated/drawn/designed
+            - "image": true if the user wants to MODIFY/ITERATE on a previously generated image (e.g., "make it brighter", "add a sunset", "change the background")
             - "video": true if the user wants a NEW video created/generated/animated
+            - "video": true if the user wants to MODIFY/ITERATE on a previously generated video
+            - "video": true if the user wants to turn/convert a previously generated IMAGE into a video or animation
             - Asking questions ABOUT images/videos is NOT generation intent
-            - Editing, analyzing, or describing an existing image is NOT generation intent
-            - "Turn this into a video" or "animate this" with an attachment IS video intent
+            - Analyzing or describing an existing attached image is NOT generation intent
+            - "Turn this into a video", "animate this", "make it move" referring to a previous image IS video intent
 
             User message: "\(userMessage)"\(attachmentContext)
 
