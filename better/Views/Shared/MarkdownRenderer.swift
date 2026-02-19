@@ -28,11 +28,12 @@ struct MarkdownRenderer: View {
         case codeBlock(String, language: String?)
     }
 
+    private static let codeBlockRegex = try? NSRegularExpression(pattern: "```(\\w*)\\n([\\s\\S]*?)```")
+
     static func parseSegments(_ text: String) -> [Segment] {
         var segments: [Segment] = []
-        let pattern = "```(\\w*)\\n([\\s\\S]*?)```"
 
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+        guard let regex = codeBlockRegex else {
             return [.text(text)]
         }
 
