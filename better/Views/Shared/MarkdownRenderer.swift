@@ -5,8 +5,6 @@ struct MarkdownRenderer: View {
     let text: String
 
     var body: some View {
-        let segments = parseSegments(text)
-
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                 switch segment {
@@ -20,12 +18,17 @@ struct MarkdownRenderer: View {
         }
     }
 
+    // Cache parse result — only recomputed when `text` changes
+    private var segments: [Segment] {
+        Self.parseSegments(text)
+    }
+
     enum Segment {
         case text(String)
         case codeBlock(String, language: String?)
     }
 
-    func parseSegments(_ text: String) -> [Segment] {
+    static func parseSegments(_ text: String) -> [Segment] {
         var segments: [Segment] = []
         let pattern = "```(\\w*)\\n([\\s\\S]*?)```"
 
@@ -84,13 +87,15 @@ struct MarkdownBlockRenderer: View {
     let text: String
 
     var body: some View {
-        let blocks = parseBlocks(text)
-
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 renderBlock(block)
             }
         }
+    }
+
+    private var blocks: [Block] {
+        Self.parseBlocks(text)
     }
 
     enum Block {
@@ -183,7 +188,7 @@ struct MarkdownBlockRenderer: View {
         }
     }
 
-    private func parseBlocks(_ text: String) -> [Block] {
+    private static func parseBlocks(_ text: String) -> [Block] {
         var blocks: [Block] = []
         let lines = text.components(separatedBy: "\n")
         var i = 0

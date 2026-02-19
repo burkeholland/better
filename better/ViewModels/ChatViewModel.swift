@@ -1,5 +1,4 @@
 import SwiftUI
-import PhotosUI
 import FirebaseFirestore
 import AVFoundation
 import os
@@ -18,7 +17,12 @@ final class ChatViewModel {
     var messages: [Message] = []
     var pendingAttachment: PendingAttachment?
 
-    private let apiClient = GeminiAPIClient()
+    // Cached tree computations — recomputed only when `messages` changes
+    private(set) var activeBranch: [Message] = []
+
+    private let apiClient = OpenRouterAPIClient()
+    private let imageService = ImageGenerationService()
+    private let videoService = VideoGenerationService()
     private let firestoreService = FirestoreService()
     private let mediaService = MediaService.shared
     private let userId: String
@@ -35,6 +39,7 @@ final class ChatViewModel {
         ) { [weak self] messages in
             Task { @MainActor [weak self] in
                 self?.messages = messages
+                self?.recomputeActiveBranch()
             }
         }
     }
@@ -45,11 +50,11 @@ final class ChatViewModel {
 
     // MARK: - Tree Logic
 
-    var activeBranch: [Message] {
+    private func recomputeActiveBranch() {
         let sorted = messages.sorted { $0.createdAt < $1.createdAt }
-        guard !sorted.isEmpty else { return [] }
+        guard !sorted.isEmpty else { activeBranch = []; return }
         let roots = sorted.filter { $0.parentId == nil }
-        guard let root = roots.last else { return [] }
+        guard let root = roots.last else { activeBranch = []; return }
         var branch: [Message] = [root]
         var current = root
         while true {
@@ -60,12 +65,12 @@ final class ChatViewModel {
             branch.append(latest)
             current = latest
         }
-        return branch
+        activeBranch = branch
     }
 
     func siblings(of message: Message) -> [Message] {
-        let sorted = messages.sorted { $0.createdAt < $1.createdAt }
-        return sorted.filter { $0.parentId == message.parentId && $0.role == message.role }
+        messages.filter { $0.parentId == message.parentId && $0.role == message.role }
+            .sorted { $0.createdAt < $1.createdAt }
     }
 
     // MARK: - Display
@@ -79,9 +84,9 @@ final class ChatViewModel {
     }
 
     var isProMode: Bool {
-        get { conversation.modelName == Constants.Models.pro }
+        get { conversation.modelName == Constants.Models.deepseekR1 }
         set {
-            conversation.modelName = newValue ? Constants.Models.pro : Constants.Models.flash
+            conversation.modelName = newValue ? Constants.Models.deepseekR1 : Constants.Models.deepseekChat
             Task { try? await firestoreService.updateConversation(conversation, userId: userId) }
         }
     }
@@ -116,21 +121,15 @@ final class ChatViewModel {
         totalInputTokens > 0 || totalOutputTokens > 0 || totalVideoCost > 0
     }
 
-    /// Estimated cost in USD based on current Gemini pricing.
     var estimatedCost: Double {
-        let isProModel = conversation.modelName.contains("pro")
-
-        // Gemini 2.5 pricing per token (as of 2025)
-        let inputRate: Double  = isProModel ? 1.25  / 1_000_000 : 0.15  / 1_000_000
-        let outputRate: Double = isProModel ? 10.0  / 1_000_000 : 0.60  / 1_000_000
-        let cachedRate: Double = isProModel ? 0.315 / 1_000_000 : 0.037 / 1_000_000
-
-        let cached = totalCachedTokens
-        let nonCachedInput = max(0, totalInputTokens - cached)
-
-        return Double(nonCachedInput) * inputRate
+        // OpenRouter Kimi K2.5 pricing per token
+        let isKimi = conversation.modelName.contains("kimi")
+        
+        let inputRate: Double  = isKimi ? 0.50 / 1_000_000 : 0.28 / 1_000_000  // Kimi vs DeepSeek
+        let outputRate: Double = isKimi ? 2.80 / 1_000_000 : 0.42 / 1_000_000
+        
+        return Double(totalInputTokens) * inputRate
              + Double(totalOutputTokens) * outputRate
-             + Double(cached) * cachedRate
              + totalVideoCost
     }
 
@@ -140,23 +139,11 @@ final class ChatViewModel {
 
     // MARK: - Attachments
 
-    func attachImage(item: PhotosPickerItem) async {
+    func attachImageData(data: Data, mimeTypeHint: String?, filename: String?) {
         errorMessage = nil
+
         do {
-            guard let data = try await item.loadTransferable(type: Data.self) else {
-                errorMessage = "Could not load selected image."
-                return
-            }
-
-            // Determine MIME type from the supported content types
-            let mimeType: String
-            if let contentType = item.supportedContentTypes.first,
-               let mime = MediaTypes.mimeType(from: contentType) {
-                mimeType = mime
-            } else {
-                mimeType = "image/jpeg"
-            }
-
+            let mimeType = resolveImageMimeType(data: data, hint: mimeTypeHint)
             try MediaTypes.validate(mimeType: mimeType, dataSize: data.count)
 
             let preview = UIImage(data: data)
@@ -164,11 +151,73 @@ final class ChatViewModel {
                 data: data,
                 mimeType: mimeType,
                 preview: preview,
-                filename: nil
+                filename: filename
             )
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = "Could not attach image: \(error.localizedDescription)"
         }
+    }
+
+    /// Attach an image from a file URL (used by file importer, bypasses Photos/iCloud).
+    func attachImageFile(url: URL) async {
+        errorMessage = nil
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+        do {
+            let data = try Data(contentsOf: url)
+
+            let ext = url.pathExtension.lowercased()
+            let mimeHint: String
+            switch ext {
+            case "png": mimeHint = "image/png"
+            case "jpg", "jpeg": mimeHint = "image/jpeg"
+            case "webp": mimeHint = "image/webp"
+            case "heic": mimeHint = "image/heic"
+            case "heif": mimeHint = "image/heif"
+            default: mimeHint = "image/jpeg"
+            }
+
+            attachImageData(data: data, mimeTypeHint: mimeHint, filename: url.lastPathComponent)
+        } catch {
+            errorMessage = "Could not attach image: \(error.localizedDescription)"
+        }
+    }
+
+    private func resolveImageMimeType(data: Data, hint: String?) -> String {
+        if let hint, hint.hasPrefix("image/"), MediaTypes.isSupported(hint) {
+            return hint
+        }
+
+        let bytes = [UInt8](data.prefix(12))
+        if bytes.count >= 8,
+           bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47,
+           bytes[4] == 0x0D, bytes[5] == 0x0A, bytes[6] == 0x1A, bytes[7] == 0x0A {
+            return "image/png"
+        }
+
+        if bytes.count >= 2, bytes[0] == 0xFF, bytes[1] == 0xD8 {
+            return "image/jpeg"
+        }
+
+        if bytes.count >= 12,
+           String(bytes: bytes[0...3], encoding: .ascii) == "RIFF",
+           String(bytes: bytes[8...11], encoding: .ascii) == "WEBP" {
+            return "image/webp"
+        }
+
+        if bytes.count >= 12,
+           String(bytes: bytes[4...7], encoding: .ascii) == "ftyp",
+           let brand = String(bytes: bytes[8...11], encoding: .ascii) {
+            if brand == "heic" || brand == "heix" || brand == "hevc" {
+                return "image/heic"
+            }
+            if brand == "heif" || brand == "mif1" || brand == "msf1" {
+                return "image/heif"
+            }
+        }
+
+        return "image/jpeg"
     }
 
     func attachPDF(url: URL) async {
@@ -267,8 +316,189 @@ final class ChatViewModel {
 
         let payloads = await buildPayloads(for: currentBranch)
 
-        let smartTitleText = text.isEmpty ? nil : text
-        startStreamingResponse(payloads: payloads, parentId: userMessage.id, userText: text, smartTitleUserText: smartTitleText, hasAttachment: attachment != nil)
+        // Check if user wants image or video generation (always enabled)
+        let intent = await detectMediaIntent(text: text)
+        
+        if intent.wantsImage {
+            // Route to image generation
+            await handleImageGeneration(prompt: text, parentId: userMessage.id)
+        } else if intent.wantsVideo {
+            // Route to video generation
+            await handleVideoGeneration(prompt: text, parentId: userMessage.id)
+        } else {
+            // Normal text response
+            let smartTitleText = text.isEmpty ? nil : text
+            startStreamingResponse(payloads: payloads, parentId: userMessage.id, userText: text, smartTitleUserText: smartTitleText, hasAttachment: attachment != nil)
+        }
+    }
+    
+    // MARK: - Media Intent Detection
+    
+    /// Asks the LLM to classify whether the user wants image or video generation.
+    /// Falls back to text if the classification call fails.
+    private func detectMediaIntent(text: String) async -> (wantsImage: Bool, wantsVideo: Bool) {
+        let classificationMessages = [
+            MessagePayload(role: "user", text: text, mediaData: nil, mediaMimeType: nil)
+        ]
+        
+        let config = GenerationConfig(
+            temperature: 0,
+            topP: 1.0,
+            topK: 1,
+            maxOutputTokens: 20
+        )
+        
+        let systemPrompt = """
+            Classify the user's intent. Reply with exactly one word:
+            - "image" if they want an image/picture/photo/drawing/illustration generated
+            - "video" if they want a video/animation/clip generated
+            - "text" if they want a normal text response
+            Reply with only that one word, nothing else.
+            """
+        
+        do {
+            let response = try await apiClient.generateContent(
+                messages: classificationMessages,
+                config: config,
+                systemInstruction: systemPrompt,
+                model: Constants.Models.deepseek
+            )
+            
+            let classification = response.choices.first?.message?.content?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() ?? "text"
+            
+            let wantsImage = classification == "image"
+            let wantsVideo = classification == "video"
+            
+            logger.info("Intent detection: \(classification) (image=\(wantsImage), video=\(wantsVideo)) for: \(text.prefix(50))")
+            
+            return (wantsImage, wantsVideo)
+        } catch {
+            logger.warning("Intent detection failed, defaulting to text: \(error.localizedDescription)")
+            return (false, false)
+        }
+    }
+    
+    // MARK: - Image Generation
+    
+    private func handleImageGeneration(prompt: String, parentId: String?) async {
+        let assistantMessage = Message(role: "model", content: "", parentId: parentId)
+        let assistantMessageId = assistantMessage.id
+        let conversationId = conversation.id
+        streamingMessage = assistantMessage
+        generationStatus = "Generating image…"
+        
+        do {
+            let (imageData, mimeType) = try await imageService.generateImage(prompt: prompt)
+            
+            // Upload to Firebase
+            generationStatus = "Uploading…"
+            let storagePath = try await firestoreService.uploadMedia(
+                data: imageData,
+                mimeType: mimeType,
+                userId: userId,
+                conversationId: conversationId,
+                messageId: assistantMessageId
+            )
+            
+            // Update streaming message with image
+            if var msg = streamingMessage, msg.id == assistantMessageId {
+                msg.mediaURL = storagePath
+                msg.mediaMimeType = mimeType
+                msg.content = "Here's the image I generated for: \"\(prompt)\""
+                streamingMessage = msg
+            }
+            
+            // Cache locally
+            mediaService.cacheMedia(data: imageData, for: storagePath)
+            
+            // Persist the message
+            await persistStreamingMessage()
+            streamingMessage = nil
+            isGenerating = false
+            Haptics.success()
+            
+        } catch {
+            logger.error("Image generation failed: \(error.localizedDescription)")
+            if var msg = streamingMessage, msg.id == assistantMessageId {
+                msg.content = "Sorry, I couldn't generate that image. \(error.localizedDescription)"
+                streamingMessage = msg
+            }
+            await persistStreamingMessage()
+            streamingMessage = nil
+            isGenerating = false
+            Haptics.error()
+        }
+    }
+    
+    // MARK: - Video Generation
+    
+    private func handleVideoGeneration(prompt: String, parentId: String?) async {
+        let assistantMessage = Message(role: "model", content: "", parentId: parentId)
+        let assistantMessageId = assistantMessage.id
+        let conversationId = conversation.id
+        streamingMessage = assistantMessage
+        
+        for await status in videoService.generateVideo(prompt: prompt) {
+            guard streamingMessage?.id == assistantMessageId else { return }
+            
+            switch status {
+            case .pending:
+                generationStatus = "Starting video generation…"
+            case .processing(let progress):
+                if let p = progress {
+                    generationStatus = "Generating video… \(Int(p * 100))%"
+                } else {
+                    generationStatus = "Generating video…"
+                }
+            case .completed(let videoData):
+                generationStatus = "Uploading…"
+                do {
+                    let storagePath = try await firestoreService.uploadMedia(
+                        data: videoData,
+                        mimeType: "video/mp4",
+                        userId: userId,
+                        conversationId: conversationId,
+                        messageId: assistantMessageId
+                    )
+                    
+                    if var msg = streamingMessage, msg.id == assistantMessageId {
+                        msg.mediaURL = storagePath
+                        msg.mediaMimeType = "video/mp4"
+                        msg.content = "Here's the video I generated for: \"\(prompt)\""
+                        streamingMessage = msg
+                    }
+                    
+                    mediaService.cacheMedia(data: videoData, for: storagePath)
+                    await persistStreamingMessage()
+                    streamingMessage = nil
+                    isGenerating = false
+                    Haptics.success()
+                    return
+                } catch {
+                    if var msg = streamingMessage, msg.id == assistantMessageId {
+                        msg.content = "Video generated but upload failed: \(error.localizedDescription)"
+                        streamingMessage = msg
+                    }
+                    await persistStreamingMessage()
+                    streamingMessage = nil
+                    isGenerating = false
+                    Haptics.error()
+                    return
+                }
+            case .failed(let error):
+                if var msg = streamingMessage, msg.id == assistantMessageId {
+                    msg.content = "Sorry, I couldn't generate that video. \(error)"
+                    streamingMessage = msg
+                }
+                await persistStreamingMessage()
+                streamingMessage = nil
+                isGenerating = false
+                Haptics.error()
+                return
+            }
+        }
     }
 
     // MARK: - Stop
@@ -278,7 +508,7 @@ final class ChatViewModel {
         streamTask = nil
 
         // Persist partial response if it has meaningful data
-        if let finalMessage = streamingMessage, Self.hasPeristableContent(finalMessage) {
+        if let finalMessage = streamingMessage, Self.hasPersistableContent(finalMessage) {
             Task {
                 try? await firestoreService.addMessage(finalMessage, conversationId: conversation.id, userId: userId)
             }
@@ -289,7 +519,7 @@ final class ChatViewModel {
     }
 
     /// Returns true if the message has text, media, or thinking content worth saving.
-    private static func hasPeristableContent(_ msg: Message) -> Bool {
+    private static func hasPersistableContent(_ msg: Message) -> Bool {
         let hasText = !msg.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasMedia = msg.mediaURL != nil
         let hasThinking = !(msg.thinkingContent?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
@@ -309,11 +539,24 @@ final class ChatViewModel {
         guard let index = branch.firstIndex(where: { $0.id == message.id }) else { return }
         let messagesUpToParent = Array(branch.prefix(index))
 
-        // Use the parent user message text for intent detection during regeneration
-        let parentUserText = messagesUpToParent.last(where: { $0.role == "user" })?.content ?? ""
-        let payloads = await buildPayloads(for: messagesUpToParent)
+        let parentUser = messagesUpToParent.last(where: { $0.role == "user" })
+        let parentUserText = parentUser?.content ?? ""
 
-        startStreamingResponse(payloads: payloads, parentId: parentId, userText: parentUserText)
+        // If the parent user message has media, go straight to vision/text — don't override with intent
+        if parentUser?.hasMedia == true {
+            let payloads = await buildPayloads(for: messagesUpToParent)
+            startStreamingResponse(payloads: payloads, parentId: parentId, userText: parentUserText)
+        } else {
+            let intent = await detectMediaIntent(text: parentUserText)
+            if intent.wantsImage {
+                await handleImageGeneration(prompt: parentUserText, parentId: parentId)
+            } else if intent.wantsVideo {
+                await handleVideoGeneration(prompt: parentUserText, parentId: parentId)
+            } else {
+                let payloads = await buildPayloads(for: messagesUpToParent)
+                startStreamingResponse(payloads: payloads, parentId: parentId, userText: parentUserText)
+            }
+        }
     }
 
     // MARK: - Edit & Resend
@@ -367,9 +610,21 @@ final class ChatViewModel {
             }
         }
 
-        let payloads = await buildPayloads(for: chain)
-
-        startStreamingResponse(payloads: payloads, parentId: userMessage.id, userText: userMessage.content)
+        // If the message has media, go straight to vision/text — don't override with intent
+        if userMessage.hasMedia {
+            let payloads = await buildPayloads(for: chain)
+            startStreamingResponse(payloads: payloads, parentId: userMessage.id, userText: userMessage.content)
+        } else {
+            let intent = await detectMediaIntent(text: userMessage.content)
+            if intent.wantsImage {
+                await handleImageGeneration(prompt: userMessage.content, parentId: userMessage.id)
+            } else if intent.wantsVideo {
+                await handleVideoGeneration(prompt: userMessage.content, parentId: userMessage.id)
+            } else {
+                let payloads = await buildPayloads(for: chain)
+                startStreamingResponse(payloads: payloads, parentId: userMessage.id, userText: userMessage.content)
+            }
+        }
     }
 
     // MARK: - Delete
@@ -435,6 +690,10 @@ final class ChatViewModel {
     // MARK: - Streaming
 
     private func startStreamingResponse(payloads: [MessagePayload], parentId: String?, userText: String = "", smartTitleUserText: String? = nil, hasAttachment: Bool = false) {
+        // Auto-switch to vision model only when a user message has media attached
+        let hasMedia = payloads.contains { $0.role == "user" && $0.mediaData != nil }
+        let model = hasMedia ? Constants.Models.qwenVision : conversation.modelName
+        
         let assistantMessage = Message(role: "model", content: "", parentId: parentId)
         let assistantMessageId = assistantMessage.id
         let conversationId = conversation.id
@@ -442,18 +701,15 @@ final class ChatViewModel {
         generationStatus = "Thinking"
 
         streamTask = Task {
-            let tools = await buildTools(userText: userText, hasAttachment: hasAttachment)
-            let systemInstruction = buildSystemInstruction(tools: tools)
+            let systemInstruction = buildSystemInstruction()
 
-            print("🔧 Tools — image: \(tools.imageGeneration), video: \(tools.videoGeneration), search: \(tools.googleSearch)")
-            print("📝 System instruction: \(systemInstruction)")
+            logger.debug("System instruction: \(systemInstruction)")
 
             let stream = apiClient.streamContent(
                 messages: payloads,
                 config: buildConfig(),
-                tools: tools,
                 systemInstruction: systemInstruction,
-                model: conversation.modelName
+                model: model
             )
             for await event in stream {
                 if Task.isCancelled { break }
@@ -472,9 +728,11 @@ final class ChatViewModel {
                         self.streamingMessage = msg
                     }
                 case .imageData(let data, let mimeType):
+                    // Handle inline image data from stream
                     await self.uploadStreamingMedia(data: data, mimeType: mimeType, messageId: assistantMessageId, conversationId: conversationId)
-                case .functionCall(let name, let args):
-                    await self.handleFunctionCall(name: name, args: args, messageId: assistantMessageId, conversationId: conversationId)
+                case .functionCall(_, _):
+                    // Function calls not used with OpenRouter
+                    break
                 case .usageMetadata(let input, let output, let cached):
                     if var msg = self.streamingMessage {
                         msg.inputTokens = input
@@ -565,130 +823,12 @@ final class ChatViewModel {
         }
     }
 
-    private func handleFunctionCall(name: String, args: [String: String], messageId: String, conversationId: String) async {
-        if name == "generate_image", let prompt = args["prompt"] {
-            if var msg = streamingMessage, msg.id == messageId, !msg.content.isEmpty {
-                msg.content = ""
-                streamingMessage = msg
-            }
-            generationStatus = "Generating image…"
-            let imageModel = conversation.modelName == Constants.Models.pro
-                ? Constants.Models.proImage
-                : Constants.Models.flashImage
-
-            let imagePayloads = [MessagePayload(role: "user", text: prompt, mediaData: nil, mediaMimeType: nil)]
-            let imageConfig = GenerationConfig(
-                temperature: conversation.temperature,
-                topP: conversation.topP,
-                topK: conversation.topK,
-                maxOutputTokens: conversation.maxOutputTokens,
-                thinkingBudget: nil,
-                responseModalities: ["IMAGE"],
-                imageConfig: nil
-            )
-
-            do {
-                let imageResponse = try await apiClient.generateContent(
-                    messages: imagePayloads,
-                    config: imageConfig,
-                    tools: nil,
-                    systemInstruction: nil,
-                    model: imageModel
-                )
-
-                // Accumulate image generation token usage
-                if let usage = imageResponse.usageMetadata, var msg = self.streamingMessage, msg.id == messageId {
-                    msg.inputTokens = (msg.inputTokens ?? 0) + (usage.promptTokenCount ?? 0)
-                    msg.outputTokens = (msg.outputTokens ?? 0) + (usage.candidatesTokenCount ?? 0)
-                    msg.cachedTokens = (msg.cachedTokens ?? 0) + (usage.cachedContentTokenCount ?? 0)
-                    self.streamingMessage = msg
-                }
-
-                generationStatus = "Uploading…"
-                var hasImageData = false
-                if let parts = imageResponse.candidates.first?.content?.parts {
-                    for part in parts {
-                        if let inlineData = part.inlineData,
-                           let data = Data(base64Encoded: inlineData.data) {
-                            await uploadStreamingMedia(data: data, mimeType: inlineData.mimeType, messageId: messageId, conversationId: conversationId)
-                            hasImageData = true
-                        } else if let text = part.text, !text.isEmpty {
-                            // Handle text-only response (e.g., safety refusal)
-                            if var msg = self.streamingMessage, msg.id == messageId {
-                                msg.content += text
-                                self.streamingMessage = msg
-                            }
-                        }
-                    }
-                }
-                
-                // If no image data was returned, show a message
-                if !hasImageData {
-                    if var msg = self.streamingMessage, msg.id == messageId, msg.content.isEmpty {
-                        msg.content = "Image could not be generated."
-                        self.streamingMessage = msg
-                    }
-                }
-            } catch {
-                guard self.streamingMessage?.id == messageId else { return }
-                if var msg = self.streamingMessage {
-                    msg.content += "\n[Image generation failed: \(error.localizedDescription)]"
-                    self.streamingMessage = msg
-                }
-            }
-        } else if name == "generate_video", let prompt = args["prompt"] {
-            generationStatus = "Generating video…"
-            let supportedRatios: Set<String> = ["16:9", "9:16"]
-            let rawRatio = args["aspectRatio"] ?? "16:9"
-            let aspectRatio = supportedRatios.contains(rawRatio) ? rawRatio : "16:9"
-
-            do {
-                let videoData = try await apiClient.generateVideo(
-                    prompt: prompt,
-                    aspectRatio: aspectRatio
-                )
-                generationStatus = "Uploading…"
-                await uploadStreamingMedia(data: videoData, mimeType: "video/mp4", messageId: messageId, conversationId: conversationId)
-
-                // Estimate video cost from duration
-                if var msg = self.streamingMessage, msg.id == messageId {
-                    let duration = await Self.videoDuration(from: videoData)
-                    // Veo per-second pricing
-                    let perSecondRate = 0.35
-                    msg.videoCost = (msg.videoCost ?? 0) + duration * perSecondRate
-                    self.streamingMessage = msg
-                }
-            } catch {
-                guard self.streamingMessage?.id == messageId else { return }
-                if var msg = self.streamingMessage {
-                    msg.content += "\n[Video generation failed: \(error.localizedDescription)]"
-                    self.streamingMessage = msg
-                }
-            }
-        }
-    }
-
     private func persistStreamingMessage() async {
-        guard let finalMessage = streamingMessage, Self.hasPeristableContent(finalMessage) else { return }
+        guard let finalMessage = streamingMessage, Self.hasPersistableContent(finalMessage) else { return }
         do {
             try await firestoreService.addMessage(finalMessage, conversationId: conversation.id, userId: userId)
         } catch {
             errorMessage = error.localizedDescription
-        }
-    }
-
-    /// Get the duration of video data in seconds using AVAsset.
-    private static func videoDuration(from data: Data) async -> Double {
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
-        defer { try? FileManager.default.removeItem(at: tempURL) }
-        do {
-            try data.write(to: tempURL)
-            let asset = AVURLAsset(url: tempURL)
-            let duration = try await asset.load(.duration)
-            let seconds = CMTimeGetSeconds(duration)
-            return seconds.isFinite ? seconds : 8.0  // fallback to 8s
-        } catch {
-            return 8.0  // Veo typically generates ~8s clips
         }
     }
 
@@ -697,49 +837,22 @@ final class ChatViewModel {
             temperature: conversation.temperature,
             topP: conversation.topP,
             topK: conversation.topK,
-            maxOutputTokens: conversation.maxOutputTokens,
-            thinkingBudget: conversation.thinkingBudget
+            maxOutputTokens: conversation.maxOutputTokens
         )
     }
 
-    /// Builds the system instruction, combining the user's custom instruction
-    /// with tool-awareness guidance so the model knows its capabilities.
-    private func buildSystemInstruction(tools: ToolsConfig) -> String {
+    private func buildSystemInstruction() -> String {
         var parts: [String] = []
-
+        
         // Minimal identity
-        parts.append("You are Gemini, a large language model by Google.")
-
-        // Inform the model about its capabilities
-        var capabilities: [String] = []
-        capabilities.append("You can generate images using the generate_image tool when the user wants images created or modified.")
-        capabilities.append("You can generate videos using the generate_video tool when the user wants videos created, or wants to animate/convert images to video.")
-        if tools.googleSearch {
-            capabilities.append("Use Google Search for current information.")
-        }
-        if tools.codeExecution {
-            capabilities.append("You can execute code when needed.")
-        }
-        parts.append(capabilities.joined(separator: " "))
-
+        parts.append("You are a helpful AI assistant.")
+        
         // Append user's custom system instruction if present
         if let custom = conversation.systemInstruction, !custom.isEmpty {
             parts.append(custom)
         }
-
+        
         return parts.joined(separator: "\n\n")
-    }
-
-    private func buildTools(userText: String, hasAttachment: Bool = false) async -> ToolsConfig {
-        // Always include image and video tools - the model will decide when to use them
-        // This avoids prompt leakage where the model outputs JSON instead of calling functions
-        return ToolsConfig(
-            googleSearch: conversation.googleSearchEnabled,
-            codeExecution: conversation.codeExecutionEnabled,
-            urlContext: conversation.urlContextEnabled,
-            imageGeneration: true,
-            videoGeneration: true
-        )
     }
 
     private func buildPayloads(for messages: [Message]) async -> [MessagePayload] {
@@ -748,15 +861,16 @@ final class ChatViewModel {
             var mediaData: Data? = nil
             var mediaMime: String? = nil
 
-            if let urlString = msg.mediaURL, let mimeType = msg.mediaMimeType {
+            // Only include media for user messages — assistant-generated images/videos
+            // should not be sent back to the API (wastes tokens, wrong role for vision APIs)
+            if msg.isUser, let urlString = msg.mediaURL, let mimeType = msg.mediaMimeType {
                 if MediaTypes.isSupported(mimeType) {
                     let maxBytes = MediaLimits.maxBytes(for: mimeType)
                     do {
                         mediaData = try await mediaService.downloadMedia(from: urlString, maxBytes: maxBytes)
                         mediaMime = mimeType
                     } catch {
-                        // Log but don't block the request — send without media
-                        print("Failed to download media for message \(msg.id): \(error.localizedDescription)")
+                        logger.warning("Failed to download media for message \(msg.id): \(error.localizedDescription)")
                     }
                 }
             }
@@ -785,21 +899,19 @@ final class ChatViewModel {
             temperature: 0.5,
             topP: 0.9,
             topK: 20,
-            maxOutputTokens: 20,
-            thinkingBudget: 0
+            maxOutputTokens: 20
         )
 
         do {
             let response = try await apiClient.generateContent(
                 messages: titleMessages,
                 config: config,
-                tools: nil,
                 systemInstruction: "Generate a concise 3-6 word title for this conversation. Return only the title text, nothing else.",
-                model: "gemini-2.5-flash-lite"
+                model: Constants.Models.deepseek  // Use cheap model for titles
             )
 
-            let title = response.candidates.first?.content?.parts?.first?.text?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let title = response.choices.first?.message?.content?
+                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? ""
             guard !title.isEmpty else { return }
 
             conversation.title = title

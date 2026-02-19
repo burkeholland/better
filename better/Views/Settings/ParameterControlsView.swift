@@ -62,12 +62,6 @@ struct ParameterControlsView: View {
                 ))
                 .frame(minHeight: 100)
             }
-
-            Section("Tools") {
-                Toggle("Google Search", isOn: $conversation.googleSearchEnabled)
-                Toggle("Code Execution", isOn: $conversation.codeExecutionEnabled)
-                Toggle("URL Context", isOn: $conversation.urlContextEnabled)
-            }
         }
         .navigationTitle("Chat Settings")
         .navigationBarTitleDisplayMode(.inline)

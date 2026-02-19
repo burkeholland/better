@@ -3,7 +3,8 @@ import Security
 
 enum KeychainService {
     nonisolated static let defaultService = "com.postrboard.better"
-    nonisolated static let defaultAccount = "gemini-api-key"
+    nonisolated static let defaultAccount = "openrouter-api-key"
+    nonisolated static let legacyAccount = "gemini-api-key"
 
     nonisolated static func save(key: String, data: Data, service: String) -> Bool {
         _ = delete(key: key, service: service)
@@ -58,11 +59,22 @@ enum KeychainService {
     }
 
     nonisolated static func loadAPIKey() -> String? {
-        guard let data = load(key: defaultAccount, service: defaultService) else {
-            return nil
+        // Try current account name first
+        if let data = load(key: defaultAccount, service: defaultService) {
+            return String(data: data, encoding: .utf8)
         }
 
-        return String(data: data, encoding: .utf8)
+        // Migrate from legacy "gemini-api-key" account if present
+        if let legacyData = load(key: legacyAccount, service: defaultService),
+           let key = String(data: legacyData, encoding: .utf8) {
+            let saved = save(key: defaultAccount, data: legacyData, service: defaultService)
+            if saved {
+                _ = delete(key: legacyAccount, service: defaultService)
+            }
+            return key
+        }
+
+        return nil
     }
 
     nonisolated static func deleteAPIKey() -> Bool {

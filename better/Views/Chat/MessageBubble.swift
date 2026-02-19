@@ -3,6 +3,24 @@ import UIKit
 import AVKit
 import Photos
 
+/// Shared image cache that survives LazyVStack view recycling.
+private final class ImageCache {
+    static let shared = ImageCache()
+    private let cache = NSCache<NSString, UIImage>()
+
+    private init() {
+        cache.countLimit = 100
+    }
+
+    func image(forKey key: String) -> UIImage? {
+        cache.object(forKey: key as NSString)
+    }
+
+    func setImage(_ image: UIImage, forKey key: String) {
+        cache.setObject(image, forKey: key as NSString)
+    }
+}
+
 struct IdentifiableImage: Identifiable {
     let id = UUID()
     let image: UIImage
@@ -238,9 +256,14 @@ private extension MessageBubble {
                     }
                     .task {
                         guard loadedImage == nil else { return }
+                        if let cached = ImageCache.shared.image(forKey: urlString) {
+                            loadedImage = cached
+                            return
+                        }
                         do {
                             let (data, _) = try await URLSession.shared.data(from: url)
                             if let image = UIImage(data: data) {
+                                ImageCache.shared.setImage(image, forKey: urlString)
                                 loadedImage = image
                             } else {
                                 imageLoadFailed = true
@@ -272,9 +295,14 @@ private extension MessageBubble {
                     }
                     .task {
                         guard loadedImage == nil else { return }
+                        if let cached = ImageCache.shared.image(forKey: urlString) {
+                            loadedImage = cached
+                            return
+                        }
                         do {
                             let data = try await MediaService.shared.downloadMedia(from: urlString)
                             if let image = UIImage(data: data) {
+                                ImageCache.shared.setImage(image, forKey: urlString)
                                 loadedImage = image
                             } else {
                                 imageLoadFailed = true
@@ -390,10 +418,7 @@ private extension MessageBubble {
     }
 
     var userBubbleMaxWidth: CGFloat {
-        let width = UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.bounds.width }
-            .first ?? 393
-        return width * 0.8
+        UIScreen.main.bounds.width * 0.8
     }
 
     func startStreamingAnimation() {

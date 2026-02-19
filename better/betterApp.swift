@@ -18,6 +18,15 @@ struct betterApp: App {
         FirebaseApp.configure()
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: FirebaseApp.app()!.options.clientID!)
         _authService = State(initialValue: AuthService())
+        
+        #if DEBUG
+        // Auto-populate API key from environment for testing
+        if KeychainService.loadAPIKey() == nil,
+           let envKey = ProcessInfo.processInfo.environment["OPEN_ROUTER_KEY"],
+           !envKey.isEmpty {
+            _ = KeychainService.saveAPIKey(envKey)
+        }
+        #endif
     }
 
     var body: some Scene {

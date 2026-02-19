@@ -1,12 +1,11 @@
 import SwiftUI
-import PhotosUI
 import UniformTypeIdentifiers
 
 struct MessageInput: View {
     @Bindable var viewModel: ChatViewModel
 
     @FocusState private var isFocused: Bool
-    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var isPhotoPickerPresented = false
     @State private var isFileImporterPresented = false
 
     private var canSend: Bool {
@@ -22,11 +21,11 @@ struct MessageInput: View {
                 HStack(spacing: 4) {
                     Group {
                         if viewModel.isProMode {
-                            Image(systemName: "sparkles")
-                            Text("Pro")
+                            Image(systemName: "brain.head.profile")
+                            Text("Thoughtful")
                         } else {
                             Image(systemName: "bolt.fill")
-                            Text("Flash")
+                            Text("Fast")
                         }
                     }
                     .font(.caption.weight(.medium))
@@ -94,8 +93,9 @@ struct MessageInput: View {
             }
 
             HStack(alignment: .bottom, spacing: 12) {
-                // Pickers
-                PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                Button {
+                    isPhotoPickerPresented = true
+                } label: {
                     Image(systemName: "photo")
                         .font(.system(size: 20))
                 }
@@ -103,11 +103,17 @@ struct MessageInput: View {
                 .disabled(viewModel.isGenerating)
                 .padding(.bottom, 8)
                 .accessibilityLabel("Attach Photo")
-                .onChange(of: selectedPhotoItem) { _, newItem in
-                    if let newItem {
-                        Task {
-                            await viewModel.attachImage(item: newItem)
-                            selectedPhotoItem = nil
+                .sheet(isPresented: $isPhotoPickerPresented) {
+                    PhotoAttachmentPicker { result in
+                        switch result {
+                        case .success(let picked):
+                            viewModel.attachImageData(
+                                data: picked.data,
+                                mimeTypeHint: picked.mimeTypeHint,
+                                filename: nil
+                            )
+                        case .failure(let error):
+                            viewModel.errorMessage = "Could not attach image: \(error.localizedDescription)"
                         }
                     }
                 }

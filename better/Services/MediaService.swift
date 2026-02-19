@@ -27,15 +27,23 @@ enum MediaServiceError: LocalizedError {
 final class MediaService {
     static let shared = MediaService()
 
-    /// In-memory cache of downloaded media bytes, keyed by storage path or URL.
-    private var cache: [String: Data] = [:]
+    /// NSCache wrapper for automatic memory pressure eviction.
+    private final class DataWrapper {
+        let data: Data
+        init(_ data: Data) { self.data = data }
+    }
+
+    private let cache = NSCache<NSString, DataWrapper>()
     private let storage = Storage.storage()
 
-    private init() {}
+    private init() {
+        // ~100 MB total cost limit; individual entries evicted under memory pressure
+        cache.totalCostLimit = 100 * 1024 * 1024
+    }
 
     /// Pre-cache media data (e.g. right after uploading, to avoid re-downloading).
     func cacheMedia(data: Data, for key: String) {
-        cache[key] = data
+        cache.setObject(DataWrapper(data), forKey: key as NSString, cost: data.count)
     }
 
     /// Download media by storage path or URL.
@@ -43,8 +51,8 @@ final class MediaService {
     /// HTTP(S) URLs use URLSession.
     /// Returns cached data if previously downloaded.
     func downloadMedia(from pathOrURL: String, maxBytes: Int = MediaLimits.maxImageBytes) async throws -> Data {
-        if let cached = cache[pathOrURL] {
-            return cached
+        if let cached = cache.object(forKey: pathOrURL as NSString) {
+            return cached.data
         }
 
         let data: Data
@@ -74,12 +82,12 @@ final class MediaService {
             throw MediaServiceError.fileTooLarge(bytes: data.count, limit: maxBytes)
         }
 
-        cache[pathOrURL] = data
+        cache.setObject(DataWrapper(data), forKey: pathOrURL as NSString, cost: data.count)
         return data
     }
 
     /// Clear the download cache.
     func clearCache() {
-        cache.removeAll()
+        cache.removeAllObjects()
     }
 }
