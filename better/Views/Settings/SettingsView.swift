@@ -72,7 +72,7 @@ struct SettingsView: View {
                             .font(.caption)
                         }
                     } else {
-                        TextField("Paste your Gemini API Key", text: $apiKeyText)
+                        TextField("Paste your OpenRouter API Key", text: $apiKeyText)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .font(.system(.body, design: .monospaced))
@@ -105,7 +105,7 @@ struct SettingsView: View {
                             .foregroundStyle(Theme.accentGradient)
                     }
                 } footer: {
-                    Text("Get your API key from Google AI Studio (aistudio.google.com)")
+                    Text("Get your API key from openrouter.ai/keys")
                 }
 
                 Section {
