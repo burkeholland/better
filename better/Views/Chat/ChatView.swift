@@ -2,16 +2,9 @@ import SwiftUI
 
 struct ChatView: View {
     @Bindable var viewModel: ChatViewModel
-    @Binding var showChatSettings: Bool
-    @State private var isNearBottom = true
-    @State private var scrollViewHeight: CGFloat = 0
-    @State private var bottomAnchorY: CGFloat = 0
-    @State private var shouldForceScroll = false
     @State private var didInitialScroll = false
 
     private let bottomAnchorId = "bottom-anchor"
-    private let scrollSpaceName = "chat-scroll"
-    private let autoScrollThreshold: CGFloat = 120
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,8 +35,12 @@ struct ChatView: View {
                                         isStreaming: viewModel.streamingMessage?.id == message.id,
                                         generationStatus: viewModel.generationStatus,
                                         branchInfo: viewModel.branchInfo(for: message),
+                                        isLastInBranch: viewModel.isLastInBranch(message),
                                         onRegenerate: {
                                             Task { await viewModel.regenerate(from: message) }
+                                        },
+                                        onFork: {
+                                            Task { await viewModel.fork(from: message) }
                                         },
                                         onEdit: { newText in
                                             Task { await viewModel.editAndResend(message, newText: newText) }
@@ -66,39 +63,11 @@ struct ChatView: View {
                         Color.clear
                             .frame(height: 1)
                             .id(bottomAnchorId)
-                            .background(
-                                GeometryReader { anchorProxy in
-                                    Color.clear.preference(
-                                        key: BottomAnchorPreferenceKey.self,
-                                        value: anchorProxy.frame(in: .named(scrollSpaceName)).minY
-                                    )
-                                }
-                            )
                     }
                 }
                 .background(Color.clear)
-                .coordinateSpace(name: scrollSpaceName)
-                .background(
-                    GeometryReader { scrollProxy in
-                        Color.clear
-                            .onAppear {
-                                scrollViewHeight = scrollProxy.size.height
-                            }
-                            .onChange(of: scrollProxy.size.height) { _, newValue in
-                                scrollViewHeight = newValue
-                            }
-                    }
-                )
-                .onPreferenceChange(BottomAnchorPreferenceKey.self) { newValue in
-                    bottomAnchorY = newValue
-                    updateIsNearBottom()
-                }
-                .onChange(of: viewModel.displayMessages.count) { _, _ in
-                    let shouldAutoScroll = shouldForceScroll || viewModel.isGenerating || isNearBottom
-                    if shouldAutoScroll {
-                        scrollToBottom(proxy)
-                    }
-                    shouldForceScroll = false
+                .onChange(of: viewModel.scrollToBottomTrigger) { _, _ in
+                    scrollToBottom(proxy)
                 }
                 .onAppear {
                     if !didInitialScroll {
@@ -147,26 +116,6 @@ struct ChatView: View {
                     .lineLimit(1)
             }
         }
-        .sheet(isPresented: $showChatSettings, onDismiss: {
-            Task { await viewModel.persistConversation() }
-        }) {
-            NavigationStack {
-                ParameterControlsView(conversation: $viewModel.conversation)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") {
-                                showChatSettings = false
-                            }
-                        }
-                    }
-            }
-        }
-    }
-
-    private func updateIsNearBottom() {
-        guard scrollViewHeight > 0 else { return }
-        let distanceFromBottom = bottomAnchorY - scrollViewHeight
-        isNearBottom = distanceFromBottom <= autoScrollThreshold
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
@@ -179,13 +128,5 @@ struct ChatView: View {
                 proxy.scrollTo(bottomAnchorId, anchor: .bottom)
             }
         }
-    }
-}
-
-private struct BottomAnchorPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }

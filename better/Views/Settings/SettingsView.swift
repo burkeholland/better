@@ -1,18 +1,18 @@
 import SwiftUI
 import FirebaseAuth
+import FirebaseFirestore
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(AppState.self) private var appState
     @Environment(AuthService.self) private var authService
-    @State private var apiKeyText: String = ""
-    @State private var hasAPIKey: Bool = false
+    @State private var customInstructions: String = ""
+    @State private var isSaving: Bool = false
     @State private var showSavedAlert: Bool = false
-    @FocusState private var isAPIKeyFocused: Bool
 
     var body: some View {
         NavigationStack {
             Form {
+                // MARK: - Account
                 Section {
                     if authService.isSignedIn, let user = authService.currentUser {
                         HStack(spacing: 12) {
@@ -47,103 +47,39 @@ struct SettingsView: View {
                         }
                     }
                 } header: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "person.circle")
-                            .font(.caption)
-                            .foregroundStyle(Theme.accentGradient)
-                        Text("Account")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(Theme.accentGradient)
-                    }
+                    sectionHeader(icon: "person.circle", title: "Account")
                 }
 
+                // MARK: - Custom Instructions
                 Section {
-                    if hasAPIKey {
-                        HStack {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(Theme.mint)
-                            Text("API Key configured")
-                            Spacer()
-                            Button("Remove", role: .destructive) {
-                                _ = KeychainService.deleteAPIKey()
-                                hasAPIKey = false
-                            }
-                            .font(.caption)
-                        }
-                    } else {
-                        TextField("Paste your OpenRouter API Key", text: $apiKeyText)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .font(.system(.body, design: .monospaced))
-                            .focused($isAPIKeyFocused)
-                            .onSubmit {
-                                saveKey()
-                            }
+                    TextEditor(text: $customInstructions)
+                        .frame(minHeight: 120)
+                        .font(.body)
 
-                        Button("Save API Key") {
-                            saveKey()
+                    Button {
+                        Task { await saveCustomInstructions() }
+                    } label: {
+                        HStack {
+                            if isSaving {
+                                ProgressView()
+                                    .tint(.white)
+                            } else {
+                                Text("Save")
+                            }
                         }
-                        .buttonStyle(.plain)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
-                        .background(Theme.sendButtonGradient)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous))
-                        .foregroundStyle(.white)
-                        .font(.headline)
-                        .opacity(apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.5 : 1.0)
-                        .disabled(apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
+                    .buttonStyle(.plain)
+                    .background(Theme.sendButtonGradient)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous))
+                    .foregroundStyle(.white)
+                    .font(.headline)
+                    .disabled(isSaving)
                 } header: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "key.fill")
-                            .font(.caption)
-                            .foregroundStyle(Theme.accentGradient)
-                        Text("API Key")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(Theme.accentGradient)
-                    }
+                    sectionHeader(icon: "text.quote", title: "Custom Instructions")
                 } footer: {
-                    Text("Get your API key from openrouter.ai/keys")
-                }
-
-                Section {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous)
-                                .fill(Theme.accentGradient)
-                                .frame(width: 44, height: 44)
-                            Image(systemName: "bubble.left.and.text.bubble.right.fill")
-                                .font(.system(size: 20, weight: .semibold))
-                                .foregroundStyle(.white)
-                        }
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Better")
-                                .font(.headline)
-                                .foregroundStyle(Theme.accentGradient)
-                            Text("Springtime chat")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Spacer()
-                    }
-                    .padding(.vertical, 4)
-
-                    LabeledContent("Version", value: "1.0")
-                    LabeledContent("Build", value: "1")
-                } header: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "info.circle")
-                            .font(.caption)
-                            .foregroundStyle(Theme.accentGradient)
-                        Text("About")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(Theme.accentGradient)
-                    }
+                    Text("Tell the AI how to behave. These instructions apply to all conversations.")
                 }
             }
             .navigationTitle("Settings")
@@ -156,31 +92,58 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.lavender)
                 }
             }
-            .alert("API Key Saved", isPresented: $showSavedAlert) {
+            .alert("Saved", isPresented: $showSavedAlert) {
                 Button("OK", role: .cancel) { }
             }
             .onAppear {
-                hasAPIKey = KeychainService.loadAPIKey() != nil
-                if !hasAPIKey {
-                    isAPIKeyFocused = true
-                }
+                Task { await loadCustomInstructions() }
             }
         }
         .tint(Theme.lavender)
     }
-    
-    private func saveKey() {
-        let trimmed = apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        if KeychainService.saveAPIKey(trimmed) {
-            hasAPIKey = true
+
+    // MARK: - Helpers
+
+    private func sectionHeader(icon: String, title: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.caption)
+                .foregroundStyle(Theme.accentGradient)
+            Text(title)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(Theme.accentGradient)
+        }
+    }
+
+    private func loadCustomInstructions() async {
+        guard let uid = authService.userId else { return }
+        let docRef = Firestore.firestore()
+            .collection(Constants.Firestore.usersCollection)
+            .document(uid)
+        do {
+            let snapshot = try await docRef.getDocument()
+            if let value = snapshot.data()?["customInstructions"] as? String {
+                customInstructions = value
+            }
+        } catch {
+            // First launch — document may not exist yet
+        }
+    }
+
+    private func saveCustomInstructions() async {
+        guard let uid = authService.userId else { return }
+        isSaving = true
+        let docRef = Firestore.firestore()
+            .collection(Constants.Firestore.usersCollection)
+            .document(uid)
+        do {
+            try await docRef.setData(["customInstructions": customInstructions], merge: true)
             showSavedAlert = true
-            apiKeyText = ""
-            appState.hasAPIKey = true
             Haptics.success()
-            Task { await appState.loadModels() }
-        } else {
+        } catch {
             Haptics.error()
         }
+        isSaving = false
     }
 }

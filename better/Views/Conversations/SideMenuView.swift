@@ -7,7 +7,6 @@ struct SideMenuView: View {
 
     let onSelect: (Conversation) -> Void
     let onSettings: () -> Void
-    let onChatSettings: () -> Void
 
     private let maxMenuWidth: CGFloat = 300
 
@@ -103,7 +102,6 @@ struct SideMenuView: View {
                     .background(
                         ZStack {
                             Theme.cream
-                            Theme.backgroundGradient.opacity(0.35)
                         }
                     )
                     .ignoresSafeArea()
@@ -203,15 +201,6 @@ struct SideMenuView: View {
 
     private var footerControls: some View {
         VStack(spacing: 10) {
-            Button {
-                onChatSettings()
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-                    isOpen = false
-                }
-            } label: {
-                footerRow(title: "Model & Parameters", systemImage: "slider.horizontal.3")
-            }
-
             Button {
                 onSettings()
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {

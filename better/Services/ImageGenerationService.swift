@@ -1,4 +1,5 @@
 import Foundation
+import FirebaseAuth
 import os
 
 private let logger = Logger(subsystem: "com.postrboard.better", category: "ImageGenerationService")
@@ -24,14 +25,15 @@ enum ImageGenerationError: Error, LocalizedError {
 }
 
 final class ImageGenerationService {
-    private let baseURL = URL(string: "https://openrouter.ai/api/v1/")
+    private let baseURL = URL(string: Constants.apiProxyBaseURL)
     
     /// Generate an image using Seedream 4.5 via chat/completions endpoint
     /// Returns the image data and mime type
     func generateImage(prompt: String) async throws -> (data: Data, mimeType: String) {
-        guard let apiKey = KeychainService.loadAPIKey(), !apiKey.isEmpty else {
+        guard let user = Auth.auth().currentUser else {
             throw ImageGenerationError.missingAPIKey
         }
+        let authToken = try await user.getIDToken()
         
         // Use chat/completions endpoint (NOT /images/generations - that doesn't exist on OpenRouter)
         guard let url = URL(string: "chat/completions", relativeTo: baseURL) else {
@@ -40,10 +42,9 @@ final class ImageGenerationService {
         
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("https://better.postrboard.com", forHTTPHeaderField: "HTTP-Referer")
-        request.setValue("Better", forHTTPHeaderField: "X-Title")
+        request.setValue("chat/completions", forHTTPHeaderField: "X-OpenRouter-Path")
         
         // Seedream 4.5 image generation via chat completions
         // Must include modality: ["image"] to get image output

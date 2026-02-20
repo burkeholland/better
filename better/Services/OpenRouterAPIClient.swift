@@ -1,4 +1,5 @@
 import Foundation
+import FirebaseAuth
 import os
 
 private let logger = Logger(subsystem: "com.postrboard.better", category: "OpenRouterAPIClient")
@@ -112,7 +113,16 @@ typealias GeminiAPIError = OpenRouterAPIError
 // MARK: - OpenRouter API Client
 
 final class OpenRouterAPIClient {
-    private let baseURL = URL(string: "https://openrouter.ai/api/v1/")
+    private let baseURL = URL(string: Constants.apiProxyBaseURL)
+
+    /// Get the current user's Firebase Auth ID token for proxy authentication
+    private func getAuthToken() async throws -> String {
+        guard let user = Auth.auth().currentUser else {
+            logger.error("No authenticated user")
+            throw OpenRouterAPIError.missingAPIKey
+        }
+        return try await user.getIDToken()
+    }
 
     func generateContent(
         messages: [MessagePayload],
@@ -120,7 +130,7 @@ final class OpenRouterAPIClient {
         systemInstruction: String?,
         model: String
     ) async throws -> OpenRouterResponse {
-        let apiKey = try requireAPIKey()
+        let apiKey = try await getAuthToken()
         let requestBody = buildRequestBody(
             messages: messages,
             config: config,
@@ -155,7 +165,7 @@ final class OpenRouterAPIClient {
         AsyncStream { continuation in
             Task {
                 do {
-                    let apiKey = try requireAPIKey()
+                    let apiKey = try await self.getAuthToken()
                     let requestBody = buildRequestBody(
                         messages: messages,
                         config: config,
@@ -204,15 +214,6 @@ final class OpenRouterAPIClient {
 
     // MARK: - Private Helpers
 
-    private func requireAPIKey() throws -> String {
-        guard let key = KeychainService.loadAPIKey(), !key.isEmpty else {
-            logger.error("No API key found in keychain")
-            throw OpenRouterAPIError.missingAPIKey
-        }
-        logger.debug("API key loaded (\(key.prefix(10))...)")
-        return key
-    }
-
     private func makeRequest(endpoint: String, method: String) throws -> URLRequest {
         guard let baseURL else {
             throw OpenRouterAPIError.invalidURL
@@ -229,8 +230,8 @@ final class OpenRouterAPIClient {
     private func setHeaders(_ request: inout URLRequest, apiKey: String) {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("https://better.postrboard.com", forHTTPHeaderField: "HTTP-Referer")
-        request.setValue("Better", forHTTPHeaderField: "X-Title")
+        // Tell the proxy which OpenRouter endpoint to forward to
+        request.setValue("chat/completions", forHTTPHeaderField: "X-OpenRouter-Path")
     }
 
     private func validateResponse(_ response: URLResponse, data: Data) throws {

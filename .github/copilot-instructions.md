@@ -2,11 +2,11 @@
 
 ## Architecture Overview
 
-This is a Swift 6 / SwiftUI iOS app that provides an AI chat client with branching conversations, powered by OpenRouter API. Key architectural decisions:
+This is a Swift 6 / SwiftUI iOS app that provides an AI chat client with branching conversations, powered by OpenRouter API via a Firebase Functions v2 proxy. Key architectural decisions:
 
-- **OpenRouter API** - Uses unified API gateway at `openrouter.ai/api/v1/` providing access to multiple AI models (DeepSeek V3.2, DeepSeek R1, etc.)
-- **Firebase backend** - Auth (Google Sign-In), Firestore (persistence), Storage (media)
-- **Branching message tree** - Messages have `parentId` references enabling conversation forking/regeneration
+- **Firebase Functions v2 proxy** — All OpenRouter API calls go through a Cloud Run-based Firebase Function that verifies Firebase Auth and injects the API key server-side. The OpenRouter API key never touches the client.
+- **Firebase backend** — Auth (Google Sign-In), Firestore (persistence + user settings), Storage (media)
+- **Branching message tree** — Messages have `parentId` references enabling conversation forking/regeneration
 
 ## Project Structure
 
@@ -14,10 +14,13 @@ This is a Swift 6 / SwiftUI iOS app that provides an AI chat client with branchi
 better/
 ├── App/           # App entry point and global state
 ├── Models/        # Codable data models (Conversation, Message)
-├── Services/      # API clients, Firebase, Keychain
+├── Services/      # API clients, Firebase services
 ├── ViewModels/    # @Observable ViewModels with @MainActor
 ├── Views/         # SwiftUI views organized by feature
 └── Utilities/     # Constants, Theme, Haptics
+
+functions/         # Firebase Functions v2 (TypeScript)
+└── src/index.ts   # SSE proxy function
 ```
 
 ## Key Patterns
@@ -49,23 +52,32 @@ OpenRouterAPIClient uses OpenAI-compatible SSE format, parsed into `StreamEvent`
 - `.functionCall(name, args)` - Not used with OpenRouter
 - `.usageMetadata(inputTokens, outputTokens, cachedTokens)` - Token counts
 
-### Keychain & API Key Management
-- API key stored in keychain under account `"openrouter-api-key"` with service `"com.postrboard.better"`
-- Legacy migration: `loadAPIKey()` also checks for keys under the old `"gemini-api-key"` account and migrates automatically
-- In DEBUG builds, the key can be injected via `OPEN_ROUTER_KEY` environment variable (for simulator testing with `SIMCTL_CHILD_OPEN_ROUTER_KEY`)
+### API Proxy Architecture
+- **No client-side API key** — The OpenRouter API key lives only in Firebase Secret Manager
+- **Auth flow**: iOS app gets Firebase Auth ID token → sends as Bearer token → Firebase Function verifies it → forwards request to OpenRouter with server-side API key
+- **SSE streaming**: The proxy function pipes OpenRouter's SSE stream directly back to the iOS client. The `OpenRouterStreamParser` is unchanged.
+- **Endpoint routing**: Client sends `X-OpenRouter-Path` header to specify which OpenRouter sub-endpoint to call (e.g., `chat/completions`, `jobs/{id}`)
+- **Proxy URL**: Set in `Constants.apiProxyBaseURL` — update after deployment
+
+### Custom Instructions
+- Stored in Firestore at `users/{userId}` document under `customInstructions` field
+- Loaded by `ChatViewModel` on init and by `SettingsView` on appear
+- Saved via explicit "Save" button in Settings
+- Sent as part of the system instruction in every API call
 
 ### Media Attachments
 [MediaService.swift](../better/Services/MediaService.swift) and [MediaTypes.swift](../better/Utilities/MediaTypes.swift) handle file uploads:
 - **Supported formats**: Images (PNG, JPEG, WEBP, HEIC, HEIF), PDFs
 - **Size limits**: 15MB for images, 10MB for PDFs (conservative for base64 encoding)
 - **Upload flow**: User selects → validate → upload to Firebase Storage → store URL in Message
-- **Send flow**: Download media bytes from Storage URLs → send as inline data to OpenRouter API
+- **Send flow**: Download media bytes from Storage URLs → send as inline data via proxy to OpenRouter API
 - **Caching**: MediaService maintains in-memory cache to avoid re-downloading on regenerate
 - **Picker implementation**: Image attachments use `PHPickerViewController` (`PhotoAttachmentPicker`) with NSItemProvider `loadFileRepresentation/loadDataRepresentation` instead of CoreTransferable wrappers for better reliability.
 
 ### Firebase Data Structure
 ```
 users/{userId}/
+  customInstructions: String        # User's custom system instructions
   conversations/{conversationId}/
     messages/{messageId}
 
@@ -93,10 +105,11 @@ See [firestore.rules](../firestore.rules) and [storage.rules](../storage.rules) 
 ### API Client
 [OpenRouterAPIClient.swift](../better/Services/OpenRouterAPIClient.swift) patterns:
 - Async/await for all requests
+- Uses Firebase Auth ID token (via `Auth.auth().currentUser?.getIDToken()`) for proxy authentication
 - `GenerationConfig` struct for model parameters (temperature, topP, topK, maxOutputTokens)
 - Returns `AsyncStream<StreamEvent>` for streaming
 - `MessagePayload` with `mediaData`/`mediaMimeType` for attaching images and PDFs
-- Uses OpenAI-compatible request format with Bearer auth
+- Uses OpenAI-compatible request format sent through Firebase proxy
 
 ### Available Models
 Defined in [Constants.swift](../better/Utilities/Constants.swift):
@@ -112,6 +125,7 @@ Defined in [Constants.swift](../better/Utilities/Constants.swift):
 
 ### Constants
 [Constants.swift](../better/Utilities/Constants.swift) contains:
+- `Constants.apiProxyBaseURL` — Firebase Functions v2 proxy endpoint
 - Model names: `Constants.Models.deepseekChat`, `.deepseekR1`, `.qwenVision`, `.seedream`, `.seedance`
 - Default parameters: `Constants.Defaults.temperature`, etc.
 - Firestore collection names: `Constants.Firestore.usersCollection`, etc.
@@ -125,20 +139,34 @@ Defined in [Constants.swift](../better/Utilities/Constants.swift):
 - DeepSeek text models are not vision-capable; attachment requests are routed to `qwenVision`.
 - On iOS Simulator, iCloud-only assets can still fail (`CloudPhotoLibraryErrorDomain` / `PHAssetExportRequestErrorDomain`); keep a local photo available for deterministic attachment testing.
 
+## Settings
+The app has a single settings screen with:
+- **Account**: Profile info (name, email) and Sign Out
+- **Custom Instructions**: Free-text editor for user-defined system instructions, persisted to Firestore
+
+There is no API key management UI — the API key is managed server-side.
+
 ## Build & Run
 
 Open `better.xcodeproj` in Xcode. Requires:
 - Xcode 16+ (Swift 6)
-- iOS 18+ deployment target
+- iOS 26+ deployment target
 - Firebase configuration in `GoogleService-Info.plist`
-- User must provide their own OpenRouter API key (stored in Keychain)
+- Users sign in with Google — no API key needed
+
+### Firebase Functions
+```bash
+cd functions && npm install && npm run build
+firebase deploy --only functions
+firebase functions:secrets:set OPENROUTER_API_KEY  # Set the API key
+```
 
 ## Adding New Features
 
 1. **New model**: Add to `Constants.Models` and `allTextModels` array
-2. **New conversation setting**: Add property to `Conversation` model, update `ParameterControlsView`
-3. **New message type**: Extend `StreamEvent` enum, handle in `ChatViewModel.startStreamingResponse`
-4. **New view**: Create in appropriate `Views/` subfolder, follow existing patterns for state management
+2. **New message type**: Extend `StreamEvent` enum, handle in `ChatViewModel.startStreamingResponse`
+3. **New view**: Create in appropriate `Views/` subfolder, follow existing patterns for state management
+4. **New proxy endpoint**: Add path to `ALLOWED_PATHS` in `functions/src/index.ts`
 
 ## Image & Video Generation
 

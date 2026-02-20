@@ -1,9 +1,9 @@
 import Foundation
 
 enum Constants {
-    static let openRouterBaseURL = "https://openrouter.ai/api/v1/"
-    static let keychainServiceName = "com.postrboard.better"
-    static let keychainAPIKeyAccount = "openrouter-api-key"
+    // Firebase Functions v2 proxy URL — update after deploying
+    // Use emulator URL for local dev: http://127.0.0.1:5001/{project}/us-central1/api
+    static let apiProxyBaseURL = "https://us-central1-better-38cdf.cloudfunctions.net/api/"
 
     enum Models {
         // Text models

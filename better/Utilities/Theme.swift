@@ -20,11 +20,23 @@ enum Theme {
 
     // UI accents
     static let warmYellow = Color(red: 0.91, green: 0.52, blue: 0.42)  // Same as peach for pin icon
-    static let cream = Color(red: 0.94, green: 0.96, blue: 0.98)       // #F0F5FA — icy blue-white
+    static let cream = Color(UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.14, green: 0.16, blue: 0.20, alpha: 1)    // Dark surface
+            : UIColor(red: 0.94, green: 0.96, blue: 0.98, alpha: 1)    // #F0F5FA — icy blue-white
+    })
 
     // Neutral tones
-    static let charcoal = Color(red: 0.12, green: 0.14, blue: 0.17)    // #1F232B — dark navy
-    static let darkGray = Color(red: 0.22, green: 0.24, blue: 0.28)    // #383D47
+    static let charcoal = Color(UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.90, green: 0.92, blue: 0.95, alpha: 1)    // Light text for dark mode
+            : UIColor(red: 0.12, green: 0.14, blue: 0.17, alpha: 1)    // #1F232B — dark navy
+    })
+    static let darkGray = Color(UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.70, green: 0.72, blue: 0.76, alpha: 1)    // Muted light for dark mode
+            : UIColor(red: 0.22, green: 0.24, blue: 0.28, alpha: 1)    // #383D47
+    })
 
     // MARK: - Gradients
 

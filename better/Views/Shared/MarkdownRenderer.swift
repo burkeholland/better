@@ -5,7 +5,7 @@ struct MarkdownRenderer: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 14) {
             ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                 switch segment {
                 case .text(let content):
@@ -88,7 +88,7 @@ struct MarkdownBlockRenderer: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 renderBlock(block)
             }
@@ -113,6 +113,7 @@ struct MarkdownBlockRenderer: View {
         switch block {
         case .paragraph(let content):
             renderInlineMarkdown(content)
+                .lineSpacing(3)
                 .textSelection(.enabled)
 
         case .heading(let level, let content):
@@ -120,7 +121,7 @@ struct MarkdownBlockRenderer: View {
                 .font(fontForHeading(level))
                 .fontWeight(.semibold)
                 .textSelection(.enabled)
-                .padding(.top, level <= 2 ? 4 : 2)
+                .padding(.top, level <= 2 ? 6 : 4)
 
         case .unorderedList(let items):
             VStack(alignment: .leading, spacing: 4) {

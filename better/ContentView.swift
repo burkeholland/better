@@ -8,7 +8,6 @@ struct ContentView: View {
     @State private var currentConversation: Conversation?
     @State private var chatViewModel: ChatViewModel?
     @State private var showSideMenu = false
-    @State private var showChatSettings = false
 
     var body: some View {
         Group {
@@ -38,7 +37,7 @@ struct ContentView: View {
             NavigationStack {
                 Group {
                     if let chatVM = chatViewModel {
-                        ChatView(viewModel: chatVM, showChatSettings: $showChatSettings)
+                        ChatView(viewModel: chatVM)
                     } else {
                         ProgressView()
                             .tint(Theme.mint)
@@ -81,9 +80,6 @@ struct ContentView: View {
                     },
                     onSettings: {
                         appState.showSettings = true
-                    },
-                    onChatSettings: {
-                        showChatSettings = true
                     }
                 )
                 .zIndex(1)
@@ -111,9 +107,6 @@ struct ContentView: View {
             SettingsView()
         }
         .onAppear {
-            if !appState.hasAPIKey {
-                appState.showSettings = true
-            }
             if currentConversation == nil {
                 createNewConversation()
             }

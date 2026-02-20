@@ -16,9 +16,12 @@ final class ChatViewModel {
     var streamingMessage: Message?
     var messages: [Message] = []
     var pendingAttachment: PendingAttachment?
+    var scrollToBottomTrigger: Int = 0
 
     // Cached tree computations — recomputed only when `messages` changes
     private(set) var activeBranch: [Message] = []
+    // Cached branch info keyed by message ID — recomputed with activeBranch
+    private(set) var cachedBranchInfo: [String: (current: Int, total: Int)] = [:]
 
     private let apiClient = OpenRouterAPIClient()
     private let imageService = ImageGenerationService()
@@ -27,19 +30,45 @@ final class ChatViewModel {
     private let mediaService = MediaService.shared
     private let userId: String
     private var streamTask: Task<Void, Never>?
+    private var pendingStreamText: String = ""
+    private var lastStreamUIUpdate: ContinuousClock.Instant = .now
+    private var customInstructions: String = ""
     nonisolated(unsafe) private var messagesListener: ListenerRegistration?
 
     init(conversation: Conversation, userId: String) {
         self.conversation = conversation
         self.userId = userId
 
+        // Load user's custom instructions from Firestore
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let doc = try await Firestore.firestore()
+                    .collection(Constants.Firestore.usersCollection)
+                    .document(userId)
+                    .getDocument()
+                if let value = doc.data()?["customInstructions"] as? String {
+                    self.customInstructions = value
+                }
+            } catch {
+                logger.warning("Failed to load custom instructions: \(error.localizedDescription)")
+            }
+        }
+
         messagesListener = firestoreService.listenToMessages(
             conversationId: conversation.id,
             userId: userId
         ) { [weak self] messages in
             Task { @MainActor [weak self] in
-                self?.messages = messages
-                self?.recomputeActiveBranch()
+                guard let self else { return }
+                self.messages = messages
+                // Skip expensive recompute while actively streaming — we already
+                // have the correct branch and the streaming message is appended
+                // in displayMessages. Still recompute during pre-stream phase
+                // (intent detection, payload building) so the user message appears.
+                if self.streamingMessage == nil {
+                    self.recomputeActiveBranch()
+                }
             }
         }
     }
@@ -51,21 +80,63 @@ final class ChatViewModel {
     // MARK: - Tree Logic
 
     private func recomputeActiveBranch() {
-        let sorted = messages.sorted { $0.createdAt < $1.createdAt }
-        guard !sorted.isEmpty else { activeBranch = []; return }
-        let roots = sorted.filter { $0.parentId == nil }
-        guard let root = roots.last else { activeBranch = []; return }
+        guard !messages.isEmpty else {
+            activeBranch = []
+            cachedBranchInfo = [:]
+            return
+        }
+
+        // Build parent→children lookup map: O(n)
+        var childrenMap: [String: [Message]] = [:]
+        var roots: [Message] = []
+        for msg in messages {
+            if let pid = msg.parentId {
+                childrenMap[pid, default: []].append(msg)
+            } else {
+                roots.append(msg)
+            }
+        }
+
+        guard let root = roots.max(by: { $0.createdAt < $1.createdAt }) else {
+            activeBranch = []
+            cachedBranchInfo = [:]
+            return
+        }
+
+        // Walk the tree using the map: O(depth) instead of O(n × depth)
         var branch: [Message] = [root]
         var current = root
         while true {
-            let children = sorted.filter { $0.parentId == current.id }
-            guard let latest = children.max(by: { a, b in
-                (a.selectedAt ?? a.createdAt) < (b.selectedAt ?? b.createdAt)
-            }) else { break }
+            guard let children = childrenMap[current.id],
+                  let latest = children.max(by: { a, b in
+                      (a.selectedAt ?? a.createdAt) < (b.selectedAt ?? b.createdAt)
+                  }) else { break }
             branch.append(latest)
             current = latest
         }
         activeBranch = branch
+
+        // Pre-compute branch info for all messages in the active branch
+        // so views don't need to access `messages` directly.
+        var info: [String: (current: Int, total: Int)] = [:]
+        for msg in branch {
+            let sibs: [Message]
+            if let pid = msg.parentId {
+                sibs = (childrenMap[pid] ?? [])
+                    .filter { $0.role == msg.role }
+                    .sorted { $0.createdAt < $1.createdAt }
+            } else {
+                sibs = roots
+                    .filter { $0.role == msg.role }
+                    .sorted { $0.createdAt < $1.createdAt }
+            }
+            if let idx = sibs.firstIndex(where: { $0.id == msg.id }) {
+                info[msg.id] = (idx + 1, sibs.count)
+            } else {
+                info[msg.id] = (1, 1)
+            }
+        }
+        cachedBranchInfo = info
     }
 
     func siblings(of message: Message) -> [Message] {
@@ -253,6 +324,7 @@ final class ChatViewModel {
 
         isGenerating = true
         errorMessage = nil
+        scrollToBottomTrigger += 1
 
         let parentId = activeBranch.last?.id
         var userMessage = Message(role: "user", content: text, parentId: parentId)
@@ -307,6 +379,18 @@ final class ChatViewModel {
 
         // Clear attachment after successful send
         pendingAttachment = nil
+
+        // Ensure user message is visible immediately in the active branch.
+        // Once we set streamingMessage below, the Firestore listener will
+        // skip recomputeActiveBranch(), so we must add it here.
+        if !activeBranch.contains(where: { $0.id == userMessage.id }) {
+            activeBranch.append(userMessage)
+        }
+
+        // Show thinking indicator immediately — before intent detection / payload building
+        let placeholderAssistant = Message(role: "model", content: "", parentId: userMessage.id)
+        streamingMessage = placeholderAssistant
+        generationStatus = "Thinking"
 
         // Build payloads — include user message in case listener hasn't fired yet
         var currentBranch = activeBranch
@@ -516,6 +600,8 @@ final class ChatViewModel {
 
         streamingMessage = nil
         isGenerating = false
+        // Recompute branch since we suppressed listener updates during streaming
+        recomputeActiveBranch()
     }
 
     /// Returns true if the message has text, media, or thinking content worth saving.
@@ -526,7 +612,7 @@ final class ChatViewModel {
         return hasText || hasMedia || hasThinking
     }
 
-    // MARK: - Regenerate
+    // MARK: - Regenerate (in-place, replaces the last assistant message)
 
     func regenerate(from message: Message) async {
         guard message.role == "model" else { return }
@@ -534,15 +620,63 @@ final class ChatViewModel {
         let parentId = message.parentId
         isGenerating = true
         errorMessage = nil
+        scrollToBottomTrigger += 1
+
+        // Delete the existing assistant message so it gets replaced
+        do {
+            try await firestoreService.deleteMessages([message.id], conversationId: conversation.id, userId: userId)
+        } catch {
+            errorMessage = error.localizedDescription
+            isGenerating = false
+            return
+        }
 
         let branch = activeBranch
-        guard let index = branch.firstIndex(where: { $0.id == message.id }) else { return }
+        let index = branch.firstIndex(where: { $0.id == message.id }) ?? branch.count
         let messagesUpToParent = Array(branch.prefix(index))
 
         let parentUser = messagesUpToParent.last(where: { $0.role == "user" })
         let parentUserText = parentUser?.content ?? ""
 
-        // If the parent user message has media, go straight to vision/text — don't override with intent
+        if parentUser?.hasMedia == true {
+            let payloads = await buildPayloads(for: messagesUpToParent)
+            startStreamingResponse(payloads: payloads, parentId: parentId, userText: parentUserText)
+        } else {
+            let intent = await detectMediaIntent(text: parentUserText)
+            if intent.wantsImage {
+                await handleImageGeneration(prompt: parentUserText, parentId: parentId)
+            } else if intent.wantsVideo {
+                await handleVideoGeneration(prompt: parentUserText, parentId: parentId)
+            } else {
+                let payloads = await buildPayloads(for: messagesUpToParent)
+                startStreamingResponse(payloads: payloads, parentId: parentId, userText: parentUserText)
+            }
+        }
+    }
+
+    // MARK: - Fork (creates a new branch sibling and switches to it)
+
+    func fork(from message: Message) async {
+        guard message.role == "model" else { return }
+
+        let parentId = message.parentId
+        isGenerating = true
+        errorMessage = nil
+        scrollToBottomTrigger += 1
+
+        let branch = activeBranch
+        guard let index = branch.firstIndex(where: { $0.id == message.id }) else { return }
+        let messagesUpToParent = Array(branch.prefix(index))
+
+        // Create placeholder and truncate active branch so the old response disappears
+        // and the thinking indicator shows in its place
+        let placeholder = Message(role: "model", content: "", parentId: parentId)
+        streamingMessage = placeholder
+        activeBranch = messagesUpToParent
+
+        let parentUser = messagesUpToParent.last(where: { $0.role == "user" })
+        let parentUserText = parentUser?.content ?? ""
+
         if parentUser?.hasMedia == true {
             let payloads = await buildPayloads(for: messagesUpToParent)
             startStreamingResponse(payloads: payloads, parentId: parentId, userText: parentUserText)
@@ -563,6 +697,7 @@ final class ChatViewModel {
 
     func editAndResend(_ message: Message, newText: String) async {
         guard message.role == "user" else { return }
+        scrollToBottomTrigger += 1
 
         var updatedMessage = message
         updatedMessage.content = newText
@@ -680,11 +815,12 @@ final class ChatViewModel {
     }
 
     func branchInfo(for message: Message) -> (current: Int, total: Int) {
-        let sibs = siblings(of: message)
-        guard let index = sibs.firstIndex(where: { $0.id == message.id }) else {
-            return (1, 1)
-        }
-        return (index + 1, sibs.count)
+        cachedBranchInfo[message.id] ?? (1, 1)
+    }
+
+    func isLastInBranch(_ message: Message) -> Bool {
+        guard let lastMessage = activeBranch.last else { return false }
+        return message.id == lastMessage.id
     }
 
     // MARK: - Streaming
@@ -694,7 +830,8 @@ final class ChatViewModel {
         let hasMedia = payloads.contains { $0.role == "user" && $0.mediaData != nil }
         let model = hasMedia ? Constants.Models.qwenVision : conversation.modelName
         
-        let assistantMessage = Message(role: "model", content: "", parentId: parentId)
+        // Reuse existing placeholder if already set (from send()), otherwise create new
+        let assistantMessage = streamingMessage ?? Message(role: "model", content: "", parentId: parentId)
         let assistantMessageId = assistantMessage.id
         let conversationId = conversation.id
         streamingMessage = assistantMessage
@@ -711,6 +848,12 @@ final class ChatViewModel {
                 systemInstruction: systemInstruction,
                 model: model
             )
+
+            // Throttle UI updates: accumulate text tokens, flush at most every 50ms
+            let streamUIInterval: ContinuousClock.Duration = .milliseconds(50)
+            self.pendingStreamText = ""
+            self.lastStreamUIUpdate = .now
+
             for await event in stream {
                 if Task.isCancelled { break }
                 // Only mutate if our message is still the active streaming message
@@ -718,14 +861,26 @@ final class ChatViewModel {
 
                 switch event {
                 case .text(let text):
-                    if var msg = self.streamingMessage {
-                        msg.content += text
-                        self.streamingMessage = msg
+                    self.pendingStreamText += text
+                    let now = ContinuousClock.now
+                    if now - self.lastStreamUIUpdate >= streamUIInterval {
+                        if var msg = self.streamingMessage {
+                            msg.content += self.pendingStreamText
+                            self.streamingMessage = msg
+                            self.pendingStreamText = ""
+                            self.lastStreamUIUpdate = now
+                        }
                     }
                 case .thinking(let thought):
                     if var msg = self.streamingMessage {
+                        // Flush any pending text first
+                        if !self.pendingStreamText.isEmpty {
+                            msg.content += self.pendingStreamText
+                            self.pendingStreamText = ""
+                        }
                         msg.thinkingContent = (msg.thinkingContent ?? "") + thought
                         self.streamingMessage = msg
+                        self.lastStreamUIUpdate = .now
                     }
                 case .imageData(let data, let mimeType):
                     // Handle inline image data from stream
@@ -747,6 +902,13 @@ final class ChatViewModel {
                 }
             }
 
+            // Flush any remaining buffered text
+            if !self.pendingStreamText.isEmpty, var msg = self.streamingMessage {
+                msg.content += self.pendingStreamText
+                self.streamingMessage = msg
+                self.pendingStreamText = ""
+            }
+
             // If cancelled (e.g. stopGenerating was called), do NOT persist — stopGenerating handles that.
             guard !Task.isCancelled else { return }
             // If our message was replaced by a newer stream, bail out.
@@ -756,6 +918,8 @@ final class ChatViewModel {
             await self.persistStreamingMessage()
             self.streamingMessage = nil
             self.isGenerating = false
+            // Recompute now that streaming is done and Firestore has the final state
+            self.recomputeActiveBranch()
             self.conversation.updatedAt = Date()
             try? await self.firestoreService.updateConversation(self.conversation, userId: self.userId)
             Haptics.success()
@@ -847,9 +1011,9 @@ final class ChatViewModel {
         // Minimal identity
         parts.append("You are a helpful AI assistant.")
         
-        // Append user's custom system instruction if present
-        if let custom = conversation.systemInstruction, !custom.isEmpty {
-            parts.append(custom)
+        // Append user's custom instructions from Firestore
+        if !customInstructions.isEmpty {
+            parts.append(customInstructions)
         }
         
         return parts.joined(separator: "\n\n")
@@ -906,18 +1070,31 @@ final class ChatViewModel {
             let response = try await apiClient.generateContent(
                 messages: titleMessages,
                 config: config,
-                systemInstruction: "Generate a concise 3-6 word title for this conversation. Return only the title text, nothing else.",
-                model: Constants.Models.deepseek  // Use cheap model for titles
+                systemInstruction: "Generate a concise 3-6 word title for this conversation. Return only the title text, nothing else. Do not wrap in quotes.",
+                model: Constants.Models.deepseek
             )
 
-            let title = response.choices.first?.message?.content?
+            var title = response.choices.first?.message?.content?
+                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'\u{201C}\u{201D}\u{2018}\u{2019}"))
                 .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? ""
-            guard !title.isEmpty else { return }
+
+            // Reject empty or junk titles (e.g. "...", "***", pure punctuation)
+            let meaningful = title.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
+            if title.isEmpty || meaningful.isEmpty {
+                logger.warning("Smart title returned empty or non-meaningful: '\(title)'")
+                return
+            }
+
+            // Cap at reasonable length
+            if title.count > 60 {
+                title = String(title.prefix(60))
+            }
 
             conversation.title = title
             try? await firestoreService.updateConversation(conversation, userId: userId)
         } catch {
-            // Silently fail — keep the truncated title
+            logger.error("Smart title generation failed: \(error.localizedDescription)")
         }
     }
 }

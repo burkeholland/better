@@ -1,4 +1,5 @@
 import Foundation
+import FirebaseAuth
 import os
 
 private let logger = Logger(subsystem: "com.postrboard.better", category: "VideoGenerationService")
@@ -33,7 +34,7 @@ enum VideoGenerationStatus: Sendable {
 }
 
 final class VideoGenerationService {
-    private let baseURL = URL(string: "https://openrouter.ai/api/v1/")
+    private let baseURL = URL(string: Constants.apiProxyBaseURL)
     
     /// Generate a video using Seedance 2.0
     /// This is a long-running operation (1-10 minutes)
@@ -46,11 +47,12 @@ final class VideoGenerationService {
         AsyncStream { continuation in
             Task {
                 do {
-                    guard let apiKey = KeychainService.loadAPIKey(), !apiKey.isEmpty else {
-                        continuation.yield(.failed(error: "Missing API key"))
+                    guard let user = Auth.auth().currentUser else {
+                        continuation.yield(.failed(error: "Not authenticated"))
                         continuation.finish()
                         return
                     }
+                    let apiKey = try await user.getIDToken()
                     
                     continuation.yield(.pending)
                     
@@ -119,10 +121,7 @@ final class VideoGenerationService {
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("https://better.postrboard.com", forHTTPHeaderField: "HTTP-Referer")
-        request.setValue("Better", forHTTPHeaderField: "X-Title")
-        
-        // Seedance video generation request
+        request.setValue("chat/completions", forHTTPHeaderField: "X-OpenRouter-Path")
         let body: [String: Any] = [
             "model": Constants.Models.seedance,
             "messages": [
@@ -172,6 +171,7 @@ final class VideoGenerationService {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("jobs/\(jobId)", forHTTPHeaderField: "X-OpenRouter-Path")
         
         let (data, response) = try await URLSession.shared.data(for: request)
         

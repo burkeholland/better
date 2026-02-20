@@ -255,25 +255,51 @@ Feed incidents back into policy and graph constraints automatically. The tool le
 
 ## Anvil: The Working Prototype
 
-We don't have to wait for the full vision. **Anvil** is a custom Copilot CLI agent (`~/.copilot/agents/anvil.agent.md`) that implements ~70% of Forgekeeper's ideas using capabilities available today:
+We don't have to wait for the full vision. **Anvil** is a custom Copilot CLI agent (`~/.copilot/agents/anvil.agent.md`) that implements the Forgekeeper philosophy using capabilities available today. It has been through **4 rounds of adversarial review** by Claude, GPT-5.3-Codex, Gemini 3 Pro, and Claude Opus 4.6.
 
 | Forgekeeper Feature | Anvil Implementation |
 |---|---|
-| Refactor Gatekeeper | Searches for existing abstractions before generating new code |
-| Adversarial Review | Generates with one model, attacks with a different model via subagent |
-| Evidence Bundles | Runs build/test/review, presents structured proof with every change |
-| Sandbox Verification | Executes tests before presenting — dev never sees broken code |
-| Requirement Compiler | Parses requests into goals, criteria, assumptions, open questions |
-| Confidence Scoring | Tags output as High/Medium/Low confidence with reasoning |
-| Complexity Budget | Compares "new code" vs "extend existing" approaches |
+| Refactor Gatekeeper | Mandatory codebase survey before generating new code; surfaces reuse opportunities with line-count comparison |
+| Adversarial Review | 1 reviewer for Medium tasks, 3 frontier models in parallel for Large (GPT-5.3, Gemini 3 Pro, Opus 4.6) |
+| Evidence Bundles | SQL-backed verification ledger — every check is an INSERT, bundle is a SELECT. Cannot be hallucinated. |
+| Baseline Capture | Snapshots build/test/diagnostic state BEFORE changes, detects regressions by diffing |
+| Verification Cascade | 3-tier: always (diagnostics), if exists (build/type/lint/test), fallback (import test/smoke script). Zero verification is never acceptable. |
+| Requirement Compiler | Parses requests into goals, criteria, assumptions; boosts vague prompts into precise specs |
+| Requirements Pushback | Challenges bad REQUIREMENTS, not just bad implementations. "This feature conflicts with existing behavior." |
+| Session History Recall | Queries past sessions before planning. "Last time this file was modified, it caused X." |
+| Confidence Scoring | Concrete definitions (High = merge without reading diff, Low = must state what would raise it) |
+| Operational Readiness | Large tasks checked for observability, degradation handling, hardcoded secrets |
+| Post-Task Learning | Stores build commands, patterns, and failure modes via `store_memory` for future sessions |
+| Anti-Hallucination | SQL GATE markers at 3 critical points; verification requires tool-call proof, not prose |
 
-### What Anvil Can't Do Yet (needs platform support)
-- True decode-time policy constraints (requires model-level integration)
-- Persistent cross-session learning (session store is read-only)
-- Real-time graph updates on file save (agent is request-driven, not event-driven)
-- Full Semantic Knowledge Graph (builds on-demand per session, doesn't persist)
+### How to Work with Anvil
 
-**To use Anvil**: Run `/agent` in Copilot CLI and select "Anvil", or invoke it directly. It follows the full forge loop — understand → survey → plan → implement → verify → present — for every task.
+**Anvil is not autocomplete. It's a senior engineer who proves their work.**
+
+Your role changes. You stop writing code and start:
+
+**Stop doing:**
+- Reviewing AI code line by line — read the Evidence Bundle instead
+- Prescribing exact implementation — describe the outcome, not the code
+- Accepting "tests passed" as sufficient — check baseline vs. after, check regressions, check what reviewers found
+- Ignoring pushback — when Anvil says "this is a bad idea," it's usually right
+
+**Start doing:**
+- Writing tickets as outcomes + constraints, not implementation steps
+- Reviewing the Plan (for Large tasks) — if the plan is right, the code will be right
+- Checking the "Issues fixed before presenting" line — that's the bugs you never saw
+- Feeding outcomes back: tell Anvil when something broke post-merge so it learns
+
+**The new workflow:**
+1. **State the problem** — what you want, not how to build it
+2. **Negotiate** — Anvil may push back on your requirements or propose a simpler approach
+3. **Approve the plan** (Large tasks) — not the code, the plan
+4. **Review the Evidence Bundle** — baseline, verification, regressions, adversarial findings
+5. **Merge with confidence** — or ask for the specific thing that would raise confidence
+
+**Trust rule:** High confidence + no regressions = commit it. Low confidence = Anvil tells you exactly what would raise it.
+
+**To use Anvil**: Run `/agent` in Copilot CLI and select "Anvil", or invoke directly.
 
 ---
 
