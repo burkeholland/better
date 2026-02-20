@@ -15,39 +15,39 @@ struct MessageInput: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button(action: {
-                viewModel.isProMode.toggle()
-                Haptics.light()
-            }) {
-                HStack(spacing: 4) {
-                    Group {
-                        if viewModel.isProMode {
-                            Image(systemName: "brain.head.profile")
-                            Text("Thoughtful")
-                        } else {
-                            Image(systemName: "bolt.fill")
-                            Text("Fast")
+                    viewModel.isProMode.toggle()
+                    Haptics.light()
+                }) {
+                    HStack(spacing: 4) {
+                        Group {
+                            if viewModel.isProMode {
+                                Image(systemName: "brain.head.profile")
+                                Text("Thoughtful")
+                            } else {
+                                Image(systemName: "bolt.fill")
+                                Text("Fast")
+                            }
                         }
+                        .font(.caption.weight(.medium))
+
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.bold))
+                            .opacity(0.5)
                     }
-                    .font(.caption.weight(.medium))
-                    
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.bold))
-                        .opacity(0.5)
+                    .foregroundStyle(viewModel.isProMode ? Theme.cream : Theme.charcoal.opacity(0.6))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        Capsule()
+                            .fill(viewModel.isProMode ? AnyShapeStyle(Theme.accentGradient) : AnyShapeStyle(Theme.lavender.opacity(0.15)))
+                    )
                 }
-                .foregroundStyle(viewModel.isProMode ? Theme.cream : Theme.charcoal.opacity(0.6))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    Capsule()
-                        .fill(viewModel.isProMode ? AnyShapeStyle(Theme.accentGradient) : AnyShapeStyle(Theme.lavender.opacity(0.15)))
-                )
-            }
-            .buttonStyle(.plain)
+                .buttonStyle(.plain)
             .padding(.horizontal)
             .padding(.top, 10)
             .padding(.bottom, 8)
 
-            // Preview Area
+            // Attachment preview
             if let attachment = viewModel.pendingAttachment {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
@@ -92,16 +92,36 @@ struct MessageInput: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            HStack(alignment: .bottom, spacing: 12) {
+            // Text field — full width, grows from 1 line
+            TextField("Message...", text: $viewModel.messageText, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...8)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Theme.inputRadius))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.inputRadius)
+                        .stroke(isFocused ? Theme.lavender.opacity(0.4) : Theme.lavender.opacity(0.2), lineWidth: 1)
+                )
+                .focused($isFocused)
+                .onSubmit {
+                    if canSend {
+                        send()
+                    }
+                }
+                .submitLabel(.send)
+                .padding(.horizontal)
+
+            // Toolbar — attach buttons left, send button right
+            HStack(spacing: 16) {
                 Button {
                     isPhotoPickerPresented = true
                 } label: {
                     Image(systemName: "photo")
-                        .font(.system(size: 20))
+                        .font(.system(size: 18))
                 }
                 .buttonStyle(PickerButtonStyle())
                 .disabled(viewModel.isGenerating)
-                .padding(.bottom, 8)
                 .accessibilityLabel("Attach Photo")
                 .sheet(isPresented: $isPhotoPickerPresented) {
                     PhotoAttachmentPicker { result in
@@ -122,11 +142,10 @@ struct MessageInput: View {
                     isFileImporterPresented = true
                 } label: {
                     Image(systemName: "doc")
-                        .font(.system(size: 20))
+                        .font(.system(size: 18))
                 }
                 .buttonStyle(PickerButtonStyle())
                 .disabled(viewModel.isGenerating)
-                .padding(.bottom, 8)
                 .accessibilityLabel("Attach Document")
                 .fileImporter(
                     isPresented: $isFileImporterPresented,
@@ -143,22 +162,7 @@ struct MessageInput: View {
                     }
                 }
 
-                TextField("Message...", text: $viewModel.messageText)
-                    .textFieldStyle(.plain)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Theme.inputRadius))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Theme.inputRadius)
-                            .stroke(Theme.lavender.opacity(0.2), lineWidth: 1)
-                    )
-                    .focused($isFocused)
-                    .onSubmit {
-                        if canSend {
-                            send()
-                        }
-                    }
-                    .submitLabel(.send)
+                Spacer()
 
                 if viewModel.isGenerating {
                     Button(action: { viewModel.stopGenerating() }) {
@@ -184,6 +188,7 @@ struct MessageInput: View {
                 }
             }
             .padding(.horizontal)
+            .padding(.top, 8)
             .padding(.bottom, 10)
         }
         .background(.ultraThinMaterial)
@@ -214,6 +219,7 @@ struct MessageInput: View {
     }
 
     private func send() {
+        isFocused = false
         let text = viewModel.messageText
         viewModel.messageText = ""
         Task { await viewModel.send(text: text) }
