@@ -28,6 +28,7 @@ final class ChatViewModel {
     private let videoService = VideoGenerationService()
     private let firestoreService = FirestoreService()
     private let mediaService = MediaService.shared
+    private let toolRegistry = ToolRegistry()
     private let userId: String
     private var streamTask: Task<Void, Never>?
     private var pendingStreamText: String = ""
@@ -837,69 +838,109 @@ final class ChatViewModel {
         streamingMessage = assistantMessage
         generationStatus = "Thinking"
 
+        let maxToolRounds = 5
+        let tools = toolRegistry.isEmpty ? nil : toolRegistry.definitions
+
         streamTask = Task {
             let systemInstruction = buildSystemInstruction()
+            let config = buildConfig()
+            var currentPayloads = payloads
+            var toolRound = 0
 
             logger.debug("System instruction: \(systemInstruction)")
 
-            let stream = apiClient.streamContent(
-                messages: payloads,
-                config: buildConfig(),
-                systemInstruction: systemInstruction,
-                model: model
-            )
+            while toolRound <= maxToolRounds {
+                let stream = apiClient.streamContent(
+                    messages: currentPayloads,
+                    config: config,
+                    systemInstruction: systemInstruction,
+                    model: model,
+                    tools: tools
+                )
 
-            // Throttle UI updates: accumulate text tokens, flush at most every 50ms
-            let streamUIInterval: ContinuousClock.Duration = .milliseconds(50)
-            self.pendingStreamText = ""
-            self.lastStreamUIUpdate = .now
+                // Throttle UI updates: accumulate text tokens, flush at most every 50ms
+                let streamUIInterval: ContinuousClock.Duration = .milliseconds(50)
+                self.pendingStreamText = ""
+                self.lastStreamUIUpdate = .now
+                var receivedToolCalls: [ToolCall]?
 
-            for await event in stream {
-                if Task.isCancelled { break }
-                // Only mutate if our message is still the active streaming message
-                guard self.streamingMessage?.id == assistantMessageId else { continue }
+                for await event in stream {
+                    if Task.isCancelled { break }
+                    // Only mutate if our message is still the active streaming message
+                    guard self.streamingMessage?.id == assistantMessageId else { continue }
 
-                switch event {
-                case .text(let text):
-                    self.pendingStreamText += text
-                    let now = ContinuousClock.now
-                    if now - self.lastStreamUIUpdate >= streamUIInterval {
+                    switch event {
+                    case .text(let text):
+                        self.pendingStreamText += text
+                        let now = ContinuousClock.now
+                        if now - self.lastStreamUIUpdate >= streamUIInterval {
+                            if var msg = self.streamingMessage {
+                                msg.content += self.pendingStreamText
+                                self.streamingMessage = msg
+                                self.pendingStreamText = ""
+                                self.lastStreamUIUpdate = now
+                            }
+                        }
+                    case .thinking(let thought):
                         if var msg = self.streamingMessage {
-                            msg.content += self.pendingStreamText
+                            // Flush any pending text first
+                            if !self.pendingStreamText.isEmpty {
+                                msg.content += self.pendingStreamText
+                                self.pendingStreamText = ""
+                            }
+                            msg.thinkingContent = (msg.thinkingContent ?? "") + thought
                             self.streamingMessage = msg
-                            self.pendingStreamText = ""
-                            self.lastStreamUIUpdate = now
+                            self.lastStreamUIUpdate = .now
                         }
-                    }
-                case .thinking(let thought):
-                    if var msg = self.streamingMessage {
-                        // Flush any pending text first
-                        if !self.pendingStreamText.isEmpty {
-                            msg.content += self.pendingStreamText
-                            self.pendingStreamText = ""
+                    case .imageData(let data, let mimeType):
+                        // Handle inline image data from stream
+                        await self.uploadStreamingMedia(data: data, mimeType: mimeType, messageId: assistantMessageId, conversationId: conversationId)
+                    case .toolCalls(let calls):
+                        receivedToolCalls = calls
+                    case .usageMetadata(let input, let output, let cached):
+                        if var msg = self.streamingMessage {
+                            msg.inputTokens = input
+                            msg.outputTokens = output
+                            msg.cachedTokens = cached
+                            self.streamingMessage = msg
                         }
-                        msg.thinkingContent = (msg.thinkingContent ?? "") + thought
-                        self.streamingMessage = msg
-                        self.lastStreamUIUpdate = .now
+                    case .error(let error):
+                        self.errorMessage = error
+                    case .done:
+                        break
                     }
-                case .imageData(let data, let mimeType):
-                    // Handle inline image data from stream
-                    await self.uploadStreamingMedia(data: data, mimeType: mimeType, messageId: assistantMessageId, conversationId: conversationId)
-                case .functionCall(_, _):
-                    // Function calls not used with OpenRouter
-                    break
-                case .usageMetadata(let input, let output, let cached):
-                    if var msg = self.streamingMessage {
-                        msg.inputTokens = input
-                        msg.outputTokens = output
-                        msg.cachedTokens = cached
-                        self.streamingMessage = msg
-                    }
-                case .error(let error):
-                    self.errorMessage = error
-                case .done:
+                }
+
+                // If cancelled or replaced, bail out
+                if Task.isCancelled { return }
+                guard self.streamingMessage?.id == assistantMessageId else { return }
+
+                // If no tool calls, we're done streaming
+                guard let toolCalls = receivedToolCalls, !toolCalls.isEmpty else {
                     break
                 }
+
+                // Execute tool calls and build follow-up request
+                // Add assistant's tool call message to payloads
+                currentPayloads.append(MessagePayload(
+                    role: "model",
+                    text: "",
+                    toolCalls: toolCalls
+                ))
+
+                // Execute each tool and add result payloads
+                for call in toolCalls {
+                    self.generationStatus = toolStatusLabel(for: call.functionName)
+                    let result = await toolRegistry.execute(name: call.functionName, arguments: call.arguments)
+                    currentPayloads.append(MessagePayload(
+                        role: "tool",
+                        text: result,
+                        toolCallId: call.id
+                    ))
+                }
+
+                self.generationStatus = "Thinking"
+                toolRound += 1
             }
 
             // Flush any remaining buffered text
@@ -930,6 +971,20 @@ final class ChatViewModel {
                     await self?.generateSmartTitle(userText: userText, responseText: responseContent)
                 }
             }
+        }
+    }
+
+    private func toolStatusLabel(for toolName: String) -> String {
+        switch toolName {
+        case "get_current_datetime": return "Checking time..."
+        case "get_location": return "Getting location..."
+        case "get_directions": return "Getting directions..."
+        case "web_search": return "Searching the web..."
+        case "get_weather": return "Checking weather..."
+        case "get_calendar_events": return "Checking calendar..."
+        case "create_reminder": return "Creating reminder..."
+        case "search_contacts": return "Searching contacts..."
+        default: return "Using \(toolName)..."
         }
     }
 

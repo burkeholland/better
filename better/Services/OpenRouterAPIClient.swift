@@ -8,9 +8,9 @@ private let logger = Logger(subsystem: "com.postrboard.better", category: "OpenR
 
 enum StreamEvent: Sendable {
     case text(String)
-    case thinking(String)  // Not used by OpenRouter but kept for compatibility
+    case thinking(String)
     case imageData(Data, mimeType: String)
-    case functionCall(name: String, args: [String: String])
+    case toolCalls([ToolCall])
     case usageMetadata(inputTokens: Int, outputTokens: Int, cachedTokens: Int?)
     case error(String)
     case done
@@ -23,6 +23,17 @@ struct MessagePayload: Sendable {
     let text: String
     let mediaData: Data?
     let mediaMimeType: String?
+    let toolCalls: [ToolCall]?
+    let toolCallId: String?
+
+    init(role: String, text: String, mediaData: Data? = nil, mediaMimeType: String? = nil, toolCalls: [ToolCall]? = nil, toolCallId: String? = nil) {
+        self.role = role
+        self.text = text
+        self.mediaData = mediaData
+        self.mediaMimeType = mediaMimeType
+        self.toolCalls = toolCalls
+        self.toolCallId = toolCallId
+    }
 }
 
 struct GenerationConfig: Sendable {
@@ -160,7 +171,8 @@ final class OpenRouterAPIClient {
         messages: [MessagePayload],
         config: GenerationConfig,
         systemInstruction: String?,
-        model: String
+        model: String,
+        tools: [ToolDefinition]? = nil
     ) -> AsyncStream<StreamEvent> {
         AsyncStream { continuation in
             Task {
@@ -171,7 +183,8 @@ final class OpenRouterAPIClient {
                         config: config,
                         systemInstruction: systemInstruction,
                         model: model,
-                        stream: true
+                        stream: true,
+                        tools: tools
                     )
 
                     var request = try makeRequest(endpoint: "chat/completions", method: "POST")
@@ -259,7 +272,8 @@ final class OpenRouterAPIClient {
         config: GenerationConfig,
         systemInstruction: String?,
         model: String,
-        stream: Bool
+        stream: Bool,
+        tools: [ToolDefinition]? = nil
     ) -> OpenRouterRequest {
         var requestMessages: [OpenRouterRequestMessage] = []
 
@@ -277,6 +291,7 @@ final class OpenRouterAPIClient {
             requestMessages.append(requestMessage)
         }
 
+        let activeTools = (tools?.isEmpty == false) ? tools : nil
         return OpenRouterRequest(
             model: model,
             messages: requestMessages,
@@ -284,14 +299,43 @@ final class OpenRouterAPIClient {
             topP: config.topP,
             maxTokens: config.maxOutputTokens,
             stream: stream,
-            streamOptions: stream ? StreamOptions(includeUsage: true) : nil
+            streamOptions: stream ? StreamOptions(includeUsage: true) : nil,
+            tools: activeTools,
+            toolChoice: activeTools != nil ? "auto" : nil
         )
     }
 
     private func buildRequestMessage(from payload: MessagePayload) -> OpenRouterRequestMessage {
         // Map Gemini-style "model" role to OpenAI-style "assistant"
         let role = payload.role == "model" ? "assistant" : payload.role
-        
+
+        // Tool result messages
+        if role == "tool", let toolCallId = payload.toolCallId {
+            return OpenRouterRequestMessage(
+                role: "tool",
+                content: .text(payload.text),
+                toolCallId: toolCallId
+            )
+        }
+
+        // Assistant messages that contain tool calls
+        if let toolCalls = payload.toolCalls, !toolCalls.isEmpty {
+            let requestCalls = toolCalls.map { call in
+                RequestToolCall(
+                    id: call.id,
+                    type: "function",
+                    function: RequestToolCallFunction(
+                        name: call.functionName,
+                        arguments: call.arguments
+                    )
+                )
+            }
+            return OpenRouterRequestMessage(
+                role: "assistant",
+                toolCalls: requestCalls
+            )
+        }
+
         // If there's media, use content array format
         if let mediaData = payload.mediaData, let mimeType = payload.mediaMimeType {
             var contentParts: [OpenRouterContentPart] = []
@@ -339,13 +383,14 @@ enum OpenRouterStreamParser {
         AsyncStream { continuation in
             Task {
                 var buffer = Data()
+                var toolCallAccumulator: [Int: AccumulatingToolCall] = [:]
 
                 do {
                     for try await byte in bytes {
                         if byte == 10 { // newline
                             let line = String(data: buffer, encoding: .utf8) ?? ""
                             buffer.removeAll(keepingCapacity: true)
-                            handleLine(line, continuation: continuation)
+                            handleLine(line, continuation: continuation, toolCallAccumulator: &toolCallAccumulator)
                         } else {
                             buffer.append(byte)
                         }
@@ -353,10 +398,17 @@ enum OpenRouterStreamParser {
 
                     if !buffer.isEmpty {
                         let line = String(data: buffer, encoding: .utf8) ?? ""
-                        handleLine(line, continuation: continuation)
+                        handleLine(line, continuation: continuation, toolCallAccumulator: &toolCallAccumulator)
                     }
                 } catch {
                     continuation.yield(.error("Stream error: \(error.localizedDescription)"))
+                }
+
+                // Emit accumulated tool calls before done
+                if !toolCallAccumulator.isEmpty {
+                    let calls = toolCallAccumulator.sorted { $0.key < $1.key }
+                        .map { ToolCall(id: $0.value.id, functionName: $0.value.name, arguments: $0.value.arguments) }
+                    continuation.yield(.toolCalls(calls))
                 }
 
                 continuation.yield(.done)
@@ -365,7 +417,7 @@ enum OpenRouterStreamParser {
         }
     }
 
-    private static func handleLine(_ rawLine: String, continuation: AsyncStream<StreamEvent>.Continuation) {
+    private static func handleLine(_ rawLine: String, continuation: AsyncStream<StreamEvent>.Continuation, toolCallAccumulator: inout [Int: AccumulatingToolCall]) {
         let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("data:") else {
             return
@@ -387,13 +439,13 @@ enum OpenRouterStreamParser {
 
         do {
             let response = try JSONDecoder().decode(OpenRouterStreamResponse.self, from: data)
-            emitEvents(from: response, continuation: continuation)
+            emitEvents(from: response, continuation: continuation, toolCallAccumulator: &toolCallAccumulator)
         } catch {
             logger.debug("Failed to decode stream chunk: \(error.localizedDescription)")
         }
     }
 
-    private static func emitEvents(from response: OpenRouterStreamResponse, continuation: AsyncStream<StreamEvent>.Continuation) {
+    private static func emitEvents(from response: OpenRouterStreamResponse, continuation: AsyncStream<StreamEvent>.Continuation, toolCallAccumulator: inout [Int: AccumulatingToolCall]) {
         // Emit usage metadata if present
         if let usage = response.usage {
             let inputTokens = usage.promptTokens ?? 0
@@ -422,6 +474,25 @@ enum OpenRouterStreamParser {
         if let content = delta.content, !content.isEmpty {
             continuation.yield(.text(content))
         }
+
+        // Accumulate tool calls from delta
+        if let toolCalls = delta.toolCalls {
+            for tc in toolCalls {
+                let index = tc.index ?? 0
+                if toolCallAccumulator[index] == nil {
+                    toolCallAccumulator[index] = AccumulatingToolCall()
+                }
+                if let id = tc.id {
+                    toolCallAccumulator[index]!.id = id
+                }
+                if let name = tc.function?.name {
+                    toolCallAccumulator[index]!.name = name
+                }
+                if let args = tc.function?.arguments {
+                    toolCallAccumulator[index]!.arguments += args
+                }
+            }
+        }
     }
 }
 
@@ -435,6 +506,8 @@ private struct OpenRouterRequest: Encodable {
     let maxTokens: Int
     let stream: Bool
     let streamOptions: StreamOptions?
+    let tools: [ToolDefinition]?
+    let toolChoice: String?
 
     private enum CodingKeys: String, CodingKey {
         case model
@@ -444,6 +517,21 @@ private struct OpenRouterRequest: Encodable {
         case maxTokens = "max_tokens"
         case stream
         case streamOptions = "stream_options"
+        case tools
+        case toolChoice = "tool_choice"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(model, forKey: .model)
+        try container.encode(messages, forKey: .messages)
+        try container.encode(temperature, forKey: .temperature)
+        try container.encode(topP, forKey: .topP)
+        try container.encode(maxTokens, forKey: .maxTokens)
+        try container.encode(stream, forKey: .stream)
+        try container.encodeIfPresent(streamOptions, forKey: .streamOptions)
+        try container.encodeIfPresent(tools, forKey: .tools)
+        try container.encodeIfPresent(toolChoice, forKey: .toolChoice)
     }
 }
 
@@ -457,7 +545,42 @@ private struct StreamOptions: Encodable {
 
 private struct OpenRouterRequestMessage: Encodable {
     let role: String
-    let content: OpenRouterMessageContent
+    let content: OpenRouterMessageContent?
+    let toolCalls: [RequestToolCall]?
+    let toolCallId: String?
+
+    init(role: String, content: OpenRouterMessageContent? = nil, toolCalls: [RequestToolCall]? = nil, toolCallId: String? = nil) {
+        self.role = role
+        self.content = content
+        self.toolCalls = toolCalls
+        self.toolCallId = toolCallId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case role
+        case content
+        case toolCalls = "tool_calls"
+        case toolCallId = "tool_call_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(role, forKey: .role)
+        try container.encodeIfPresent(content, forKey: .content)
+        try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
+        try container.encodeIfPresent(toolCallId, forKey: .toolCallId)
+    }
+}
+
+private struct RequestToolCall: Encodable {
+    let id: String
+    let type: String
+    let function: RequestToolCallFunction
+}
+
+private struct RequestToolCallFunction: Encodable {
+    let name: String
+    let arguments: String
 }
 
 private enum OpenRouterMessageContent: Encodable {
@@ -527,11 +650,32 @@ private struct OpenRouterStreamDelta: Codable {
     let content: String?
     let reasoning: String?
     let reasoningContent: String?
+    let toolCalls: [StreamToolCallDelta]?
     
     private enum CodingKeys: String, CodingKey {
         case role, content, reasoning
         case reasoningContent = "reasoning_content"
+        case toolCalls = "tool_calls"
     }
+}
+
+private struct StreamToolCallDelta: Codable {
+    let index: Int?
+    let id: String?
+    let type: String?
+    let function: StreamFunctionDelta?
+}
+
+private struct StreamFunctionDelta: Codable {
+    let name: String?
+    let arguments: String?
+}
+
+/// Mutable accumulator for tool calls being streamed incrementally.
+private struct AccumulatingToolCall {
+    var id: String = ""
+    var name: String = ""
+    var arguments: String = ""
 }
 
 // MARK: - OpenRouter Error Response
