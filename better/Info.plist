@@ -6,6 +6,12 @@
 	<string>Better needs access to your photo library to attach images to messages.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Better uses your location to provide contextual answers, nearby recommendations, and directions.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Better can check your calendar to help you manage your schedule.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Better can create reminders for you when you ask.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Better can look up contacts when you ask for someone's phone number or email.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

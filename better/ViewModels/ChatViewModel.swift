@@ -44,6 +44,13 @@ final class ChatViewModel {
         toolRegistry.register(DateTimeTool())
         toolRegistry.register(LocationTool())
         toolRegistry.register(DirectionsTool())
+        toolRegistry.register(WebSearchTool())
+        toolRegistry.register(WeatherTool())
+        toolRegistry.register(CalendarTool())
+        toolRegistry.register(RemindersTool())
+        toolRegistry.register(ContactsTool())
+        toolRegistry.register(PhoneCallTool())
+        toolRegistry.register(TextMessageTool())
 
         // Load user's custom instructions from Firestore
         Task { @MainActor [weak self] in

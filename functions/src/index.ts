@@ -6,11 +6,12 @@ import * as logger from "firebase-functions/logger";
 admin.initializeApp();
 
 const openRouterApiKey = defineSecret("OPENROUTER_API_KEY");
+const tavilyApiKey = defineSecret("TAVILY_API_KEY");
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1/";
 
 // Allowed OpenRouter endpoints that clients can proxy through
-const ALLOWED_PATHS = ["chat/completions", "jobs/"];
+const ALLOWED_PATHS = ["chat/completions", "jobs/", "search"];
 
 /**
  * SSE proxy for OpenRouter API.
@@ -21,7 +22,7 @@ export const api = onRequest(
     region: "us-central1",
     memory: "256MiB",
     timeoutSeconds: 300, // 5 min for long streaming responses / video jobs
-    secrets: [openRouterApiKey],
+    secrets: [openRouterApiKey, tavilyApiKey],
   },
   async (req, res) => {
     // CORS preflight
@@ -64,7 +65,38 @@ export const api = onRequest(
 
     logger.info("Proxying request", { uid, path: subPath, method: req.method });
 
-    // --- Proxy ---
+    // --- Search (Tavily) ---
+    if (subPath === "search") {
+      try {
+        const searchKey = tavilyApiKey.value();
+        if (!searchKey) {
+          res.status(503).json({ error: "Search service not configured" });
+          return;
+        }
+
+        const searchBody = {
+          api_key: searchKey,
+          query: req.body?.query || "",
+          max_results: req.body?.max_results || 5,
+          search_depth: "basic",
+        };
+
+        const searchResponse = await fetch("https://api.tavily.com/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(searchBody),
+        });
+
+        const searchData = await searchResponse.json();
+        res.status(searchResponse.status).json(searchData);
+      } catch (err) {
+        logger.error("Search error", { error: err, uid });
+        res.status(502).json({ error: "Search request failed" });
+      }
+      return;
+    }
+
+    // --- Proxy (OpenRouter) ---
     try {
       const headers: Record<string, string> = {
         "Authorization": `Bearer ${apiKey}`,
