@@ -36,7 +36,9 @@ struct MessageBubble: View {
     let isStreaming: Bool
     let generationStatus: String
     let branchInfo: (current: Int, total: Int)
+    let isLastInBranch: Bool
     let onRegenerate: () -> Void
+    let onFork: () -> Void
     let onEdit: (String) -> Void
     let onDeleteSingle: () -> Void
     let onDelete: () -> Void
@@ -52,6 +54,7 @@ struct MessageBubble: View {
     @State private var localVideoURL: URL?
     @State private var videoLoadFailed = false
     @State private var selectedPDF: IdentifiableURL?
+    @State private var copied = false
 
     var body: some View {
         VStack(alignment: message.isUser ? .trailing : .leading, spacing: 8) {
@@ -88,9 +91,17 @@ struct MessageBubble: View {
 
             if !message.isUser {
                 Button {
-                    onRegenerate()
+                    onFork()
                 } label: {
-                    Label("Regenerate", systemImage: "arrow.triangle.2.circlepath")
+                    Label("Fork", systemImage: "arrow.triangle.branch")
+                }
+
+                if isLastInBranch {
+                    Button {
+                        onRegenerate()
+                    } label: {
+                        Label("Regenerate", systemImage: "arrow.triangle.2.circlepath")
+                    }
                 }
             }
 
@@ -110,10 +121,12 @@ struct MessageBubble: View {
             if editText.isEmpty {
                 editText = message.content
             }
-            if !didAppear {
+            if !didAppear && !isStreaming {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                     didAppear = true
                 }
+            } else {
+                didAppear = true
             }
             if isStreaming {
                 startStreamingAnimation()
@@ -168,13 +181,69 @@ private extension MessageBubble {
     }
 
     var assistantMessage: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             messageContent
                 .foregroundStyle(Theme.charcoal)
+
+            if !isStreaming && !message.content.isEmpty {
+                actionBar
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, Theme.messagePaddingHorizontal)
         .padding(.vertical, 4)
+    }
+
+    var actionBar: some View {
+        HStack(spacing: 16) {
+            Button {
+                onFork()
+            } label: {
+                Label("Fork", systemImage: "arrow.triangle.branch")
+                    .font(.caption2.weight(.medium))
+            }
+            .foregroundStyle(Theme.charcoal.opacity(0.4))
+
+            if isLastInBranch {
+                Button {
+                    onRegenerate()
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.caption2)
+                }
+                .foregroundStyle(Theme.charcoal.opacity(0.4))
+            }
+
+            Button {
+                handleCopy()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.caption2)
+                    if copied {
+                        Text("Copied!")
+                            .font(.caption2)
+                            .transition(.opacity)
+                    }
+                }
+            }
+            .foregroundStyle(copied ? Theme.mint : Theme.charcoal.opacity(0.4))
+            .animation(.easeInOut(duration: 0.2), value: copied)
+        }
+        .padding(.top, 2)
+    }
+
+    private func handleCopy() {
+        UIPasteboard.general.string = message.content
+        Haptics.light()
+        withAnimation(.easeInOut(duration: 0.2)) {
+            copied = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                copied = false
+            }
+        }
     }
 
     var messageContent: some View {
