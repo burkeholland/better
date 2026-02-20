@@ -40,6 +40,11 @@ final class ChatViewModel {
         self.conversation = conversation
         self.userId = userId
 
+        // Register tools
+        toolRegistry.register(DateTimeTool())
+        toolRegistry.register(LocationTool())
+        toolRegistry.register(DirectionsTool())
+
         // Load user's custom instructions from Firestore
         Task { @MainActor [weak self] in
             guard let self else { return }
