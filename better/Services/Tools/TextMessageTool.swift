@@ -3,7 +3,7 @@ import UIKit
 
 struct TextMessageTool: ChatTool {
     let name = "send_text_message"
-    let description = "Open the Messages app with a pre-filled recipient and message body. The user can review and send the message."
+    let description = "Open the Messages app with a pre-filled recipient and message body. The user can review and send the message. Requires a phone number — if you only have a name, call search_contacts first to get the number."
 
     let parametersSchema: JSONValue = .object([
         "type": .string("object"),
@@ -32,7 +32,7 @@ struct TextMessageTool: ChatTool {
 
         var urlString = "sms:\(cleaned)"
         if !message.isEmpty, let encoded = message.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
-            urlString += "&body=\(encoded)"
+            urlString += "?body=\(encoded)"
         }
 
         guard let url = URL(string: urlString) else {

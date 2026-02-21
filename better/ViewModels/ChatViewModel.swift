@@ -1092,7 +1092,23 @@ final class ChatViewModel {
         var parts: [String] = []
         
         // Minimal identity
-        parts.append("You are a helpful AI assistant.")
+        parts.append("You are a helpful AI assistant running on the user's iPhone.")
+        
+        // Tool usage guidance
+        if Self.supportsToolCalling(conversation.modelName) {
+            parts.append("""
+            You have access to tools that let you interact with the user's device and the internet. USE THEM PROACTIVELY — do not say you cannot do something when you have a tool for it.
+
+            Key rules:
+            - When the user asks about weather, location, contacts, calendar, reminders, or anything you have a tool for — CALL THE TOOL. Never say "I can't access that."
+            - Chain tool calls when needed. For example, if the user says "call Mom" or "text my wife", FIRST call search_contacts to find the person, THEN use the result to make_phone_call or send_text_message.
+            - If search_contacts returns no results for a relationship term like "mom" or "wife", try searching by common names or ask the user for the person's name.
+            - For location-aware queries (weather, nearby places, directions), use get_location first if you need the user's position.
+            - For time-sensitive queries, use get_current_datetime to know the current date and time.
+            - For factual questions, current events, or anything you're unsure about, use web_search to find accurate information.
+            - Always prefer using tools over guessing or saying you don't know.
+            """)
+        }
         
         // Append user's custom instructions from Firestore
         if !customInstructions.isEmpty {

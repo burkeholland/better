@@ -3,7 +3,7 @@ import UIKit
 
 struct PhoneCallTool: ChatTool {
     let name = "make_phone_call"
-    let description = "Initiate a phone call to a given number. The user will see the Phone app with a confirmation before the call is placed."
+    let description = "Initiate a phone call to a given number. The user will see the Phone app with a confirmation before the call is placed. Requires a phone number — if you only have a name, call search_contacts first to get the number."
 
     let parametersSchema: JSONValue = .object([
         "type": .string("object"),
