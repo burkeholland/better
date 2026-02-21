@@ -30,16 +30,11 @@ struct WeatherTool: ChatTool {
             }
             coordinates = loc
         } else {
-            let manager = CLLocationManager()
-            let status = manager.authorizationStatus
-            if status == .notDetermined {
-                manager.requestWhenInUseAuthorization()
-                try await Task.sleep(for: .seconds(2))
-            }
-            guard let loc = manager.location else {
+            do {
+                coordinates = try await LocationFetcher.requestLocation()
+            } catch {
                 return "Unable to determine current location. Try specifying a city name."
             }
-            coordinates = loc
         }
 
         let weatherService = WeatherService.shared
