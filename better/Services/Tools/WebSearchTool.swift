@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.postrboard.better", category: "WebSearchTool")
 
 struct WebSearchTool: ChatTool {
     let name = "web_search"
@@ -56,14 +59,27 @@ struct WebSearchTool: ChatTool {
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else {
+            logger.error("Non-HTTP response from search proxy")
+            return "Web search is not available. The search service may not be configured."
+        }
+
+        logger.info("Search response status: \(http.statusCode), body length: \(data.count)")
+
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? "(no body)"
+            logger.error("Search error response: \(body)")
             return "Web search is not available. The search service may not be configured."
         }
 
         guard let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let results = result["results"] as? [[String: Any]] else {
+            let body = String(data: data, encoding: .utf8) ?? "(no body)"
+            logger.error("Failed to parse search results. Body prefix: \(String(body.prefix(500)))")
             return "No results found for '\(query)'."
         }
+
+        logger.info("Search returned \(results.count) results for: \(query)")
 
         var output: [String] = ["Search results for: \(query)\n"]
         for (i, item) in results.prefix(5).enumerated() {

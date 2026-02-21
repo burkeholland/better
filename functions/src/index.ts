@@ -75,7 +75,6 @@ export const api = onRequest(
         }
 
         const searchBody = {
-          api_key: searchKey,
           query: req.body?.query || "",
           max_results: req.body?.max_results || 5,
           search_depth: "basic",
@@ -83,7 +82,10 @@ export const api = onRequest(
 
         const searchResponse = await fetch("https://api.tavily.com/search", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${searchKey}`,
+          },
           body: JSON.stringify(searchBody),
         });
 
