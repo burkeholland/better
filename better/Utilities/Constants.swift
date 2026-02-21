@@ -7,15 +7,16 @@ enum Constants {
 
     enum Models {
         // Text models
-        static let deepseekChat = "deepseek/deepseek-chat"
+        static let geminiFlash = "google/gemini-2.5-flash"
         static let deepseekR1 = "deepseek/deepseek-r1"
         
         // Vision model (used automatically when images are attached)
         static let qwenVision = "qwen/qwen2.5-vl-32b-instruct"
         
         // Legacy aliases
+        static let deepseekChat = geminiFlash
+        static let deepseek = geminiFlash
         static let kimiK25 = deepseekR1
-        static let deepseek = deepseekChat
         
         // Image generation models
         static let seedream = "bytedance-seed/seedream-4.5"
@@ -24,11 +25,11 @@ enum Constants {
         static let seedance = "bytedance/seedance-2.0"
         
         // Default
-        static let defaultModel = deepseekChat
+        static let defaultModel = geminiFlash
         
         // All available text models for picker
         static let allTextModels: [(id: String, name: String, description: String)] = [
-            (deepseekChat, "DeepSeek V3.2", "Fast - $0.28/$0.42 per M tokens"),
+            (geminiFlash, "Gemini 2.5 Flash", "Fast - $0.30/$2.50 per M tokens"),
             (deepseekR1, "DeepSeek R1", "Thoughtful - $0.55/$2.19 per M tokens")
         ]
     }

@@ -851,7 +851,9 @@ final class ChatViewModel {
         generationStatus = "Thinking"
 
         let maxToolRounds = 5
-        let tools = toolRegistry.isEmpty ? nil : toolRegistry.definitions
+        // Only send tools for models that support function calling
+        let modelSupportsTools = Self.supportsToolCalling(model)
+        let tools = (!toolRegistry.isEmpty && modelSupportsTools) ? toolRegistry.definitions : nil
 
         streamTask = Task {
             let systemInstruction = buildSystemInstruction()
@@ -932,6 +934,8 @@ final class ChatViewModel {
                     break
                 }
 
+                logger.info("Tool round \(toolRound + 1): executing \(toolCalls.count) tool call(s)")
+
                 // Execute tool calls and build follow-up request
                 // Add assistant's tool call message to payloads
                 currentPayloads.append(MessagePayload(
@@ -943,7 +947,9 @@ final class ChatViewModel {
                 // Execute each tool and add result payloads
                 for call in toolCalls {
                     self.generationStatus = toolStatusLabel(for: call.functionName)
+                    logger.info("Executing tool: \(call.functionName, privacy: .public) (id: \(call.id, privacy: .public))")
                     let result = await toolRegistry.execute(name: call.functionName, arguments: call.arguments)
+                    logger.info("Tool \(call.functionName, privacy: .public) result length: \(result.count)")
                     currentPayloads.append(MessagePayload(
                         role: "tool",
                         text: result,
@@ -1070,6 +1076,16 @@ final class ChatViewModel {
             topK: conversation.topK,
             maxOutputTokens: conversation.maxOutputTokens
         )
+    }
+
+    /// Models verified to support OpenAI-compatible function/tool calling on OpenRouter.
+    private static let toolCapableModels: Set<String> = [
+        Constants.Models.geminiFlash,
+        Constants.Models.qwenVision,
+    ]
+
+    private static func supportsToolCalling(_ model: String) -> Bool {
+        toolCapableModels.contains(model)
     }
 
     private func buildSystemInstruction() -> String {

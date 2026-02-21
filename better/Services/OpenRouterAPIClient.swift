@@ -194,6 +194,9 @@ final class OpenRouterAPIClient {
                     
                     logger.info("Streaming request to: \(request.url?.absoluteString ?? "nil", privacy: .public)")
                     logger.info("Model: \(model, privacy: .public)")
+                    if let tools {
+                        logger.info("Tools: \(tools.count) tool definitions attached")
+                    }
 
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
 
@@ -408,6 +411,7 @@ enum OpenRouterStreamParser {
                 if !toolCallAccumulator.isEmpty {
                     let calls = toolCallAccumulator.sorted { $0.key < $1.key }
                         .map { ToolCall(id: $0.value.id, functionName: $0.value.name, arguments: $0.value.arguments) }
+                    logger.info("Emitting \(calls.count) tool call(s): \(calls.map(\.functionName).joined(separator: ", "), privacy: .public)")
                     continuation.yield(.toolCalls(calls))
                 }
 
@@ -566,7 +570,12 @@ private struct OpenRouterRequestMessage: Encodable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(role, forKey: .role)
-        try container.encodeIfPresent(content, forKey: .content)
+        // OpenRouter requires "content": null (not omitted) for assistant tool-call messages
+        if toolCalls != nil {
+            try container.encodeNil(forKey: .content)
+        } else {
+            try container.encodeIfPresent(content, forKey: .content)
+        }
         try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
         try container.encodeIfPresent(toolCallId, forKey: .toolCallId)
     }

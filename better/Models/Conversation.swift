@@ -22,6 +22,7 @@ struct Conversation: Codable, Identifiable, Equatable, Hashable {
     
     // Models that have been removed — remap to default
     private static let deprecatedModels: Set<String> = [
+        "deepseek/deepseek-chat",
         "moonshotai/kimi-k2.5",
         "meta-llama/llama-4-maverick:free",
         "gemini-flash-latest",
